@@ -15,8 +15,11 @@ package com.facebook.presto.execution;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.execution.StateMachine.StateChangeListener;
-import com.facebook.presto.memory.MemoryPoolId;
 import com.facebook.presto.memory.VersionedMemoryPoolId;
+import com.facebook.presto.spi.QueryId;
+import com.facebook.presto.spi.memory.MemoryPoolId;
+import com.facebook.presto.spi.resourceGroups.ResourceGroupId;
+import com.facebook.presto.sql.planner.Plan;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -33,6 +36,7 @@ import static com.facebook.presto.execution.QueryState.FINISHED;
 import static com.facebook.presto.execution.QueryState.QUEUED;
 import static com.facebook.presto.execution.QueryState.RUNNING;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class MockQueryExecution
@@ -42,26 +46,30 @@ public class MockQueryExecution
     private final long memoryUsage;
     private final Duration cpuUsage;
     private final Session session;
+    private final QueryId queryId;
     private QueryState state = QUEUED;
     private Throwable failureCause;
+    private Optional<ResourceGroupId> resourceGroupId;
 
     public MockQueryExecution(long memoryUsage)
     {
-        this(memoryUsage, 1);
+        this(memoryUsage, "query_id", 1);
     }
 
-    public MockQueryExecution(long memoryUsage, int priority)
+    public MockQueryExecution(long memoryUsage, String queryId, int priority)
     {
-        this(memoryUsage, new Duration(0, MILLISECONDS), priority);
+        this(memoryUsage, queryId, priority, new Duration(0, MILLISECONDS));
     }
 
-    public MockQueryExecution(long memoryUsage, Duration cpuUsage, int priority)
+    public MockQueryExecution(long memoryUsage, String queryId, int priority, Duration cpuUsage)
     {
         this.memoryUsage = memoryUsage;
         this.cpuUsage = cpuUsage;
         this.session = testSessionBuilder()
-                .setSystemProperties(ImmutableMap.of(QUERY_PRIORITY, String.valueOf(priority)))
+                .setSystemProperty(QUERY_PRIORITY, String.valueOf(priority))
                 .build();
+        this.resourceGroupId = Optional.empty();
+        this.queryId = new QueryId(queryId);
     }
 
     public void complete()
@@ -73,7 +81,7 @@ public class MockQueryExecution
     @Override
     public QueryId getQueryId()
     {
-        throw new UnsupportedOperationException();
+        return queryId;
     }
 
     @Override
@@ -99,13 +107,22 @@ public class MockQueryExecution
                 Optional.empty(),
                 null,
                 null,
-                ImmutableSet.of());
+                ImmutableSet.of(),
+                Optional.empty(),
+                state.isDone(),
+                Optional.empty());
     }
 
     @Override
     public QueryState getState()
     {
         return state;
+    }
+
+    @Override
+    public Plan getQueryPlan()
+    {
+        throw new UnsupportedOperationException();
     }
 
     public Throwable getFailureCause()
@@ -151,6 +168,18 @@ public class MockQueryExecution
     }
 
     @Override
+    public Optional<ResourceGroupId> getResourceGroup()
+    {
+        return this.resourceGroupId;
+    }
+
+    @Override
+    public void setResourceGroup(ResourceGroupId resourceGroupId)
+    {
+        this.resourceGroupId = Optional.of(requireNonNull(resourceGroupId, "resourceGroupId is null"));
+    }
+
+    @Override
     public void start()
     {
         state = RUNNING;
@@ -192,6 +221,12 @@ public class MockQueryExecution
     public void addStateChangeListener(StateChangeListener<QueryState> stateChangeListener)
     {
         listeners.add(stateChangeListener);
+    }
+
+    @Override
+    public void addFinalQueryInfoListener(StateChangeListener<QueryInfo> stateChangeListener)
+    {
+        throw new UnsupportedOperationException();
     }
 
     private void fireStateChange()

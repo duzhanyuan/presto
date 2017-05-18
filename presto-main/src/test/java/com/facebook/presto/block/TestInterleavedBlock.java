@@ -15,8 +15,10 @@ package com.facebook.presto.block;
 
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
+import com.facebook.presto.spi.block.InterleavedBlock;
 import com.facebook.presto.spi.block.InterleavedBlockBuilder;
 import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.spi.type.VarcharType;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
@@ -25,11 +27,15 @@ import org.testng.annotations.Test;
 
 import java.lang.reflect.Array;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
+import static com.facebook.presto.spi.type.VarcharType.createUnboundedVarcharType;
+import static java.lang.Math.toIntExact;
+import static java.lang.String.format;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
@@ -59,6 +65,33 @@ public class TestInterleavedBlock
         assertBlockFilteredPositions(expectedValues, blockBuilder, Ints.asList(0, 1, 4, 5, 6, 7, 14, 15));
         assertBlockFilteredPositions(expectedValues, blockBuilder.build(), Ints.asList(0, 1, 4, 5, 6, 7, 14, 15));
         assertBlockFilteredPositions(expectedValues, blockBuilder.build(), Ints.asList(2, 3, 4, 5, 8, 9, 12, 13));
+    }
+
+    @Test
+    private void testGetSizeInBytes()
+    {
+        int numEntries = 2000;
+        VarcharType unboundedVarcharType = createUnboundedVarcharType();
+        InterleavedBlockBuilder blockBuilder = new InterleavedBlockBuilder(ImmutableList.of(unboundedVarcharType, BIGINT), new BlockBuilderStatus(), numEntries);
+        for (int i = 0; i < numEntries; i += 2) {
+            unboundedVarcharType.writeString(blockBuilder, String.valueOf(ThreadLocalRandom.current().nextLong()));
+            BIGINT.writeLong(blockBuilder, ThreadLocalRandom.current().nextLong());
+        }
+        InterleavedBlock block = blockBuilder.build();
+
+        List<Block> splitQuarter = splitBlock(block, 4);
+        int sizeInBytes = block.getSizeInBytes();
+        int quarter1size = splitQuarter.get(0).getSizeInBytes();
+        int quarter2size = splitQuarter.get(1).getSizeInBytes();
+        int quarter3size = splitQuarter.get(2).getSizeInBytes();
+        int quarter4size = splitQuarter.get(3).getSizeInBytes();
+        double expectedQuarterSizeMin = sizeInBytes * 0.2;
+        double expectedQuarterSizeMax = sizeInBytes * 0.3;
+        assertTrue(quarter1size > expectedQuarterSizeMin && quarter1size < expectedQuarterSizeMax, format("quarter1size is %s, should be between %s and %s", quarter1size, expectedQuarterSizeMin, expectedQuarterSizeMax));
+        assertTrue(quarter2size > expectedQuarterSizeMin && quarter2size < expectedQuarterSizeMax, format("quarter2size is %s, should be between %s and %s", quarter2size, expectedQuarterSizeMin, expectedQuarterSizeMax));
+        assertTrue(quarter3size > expectedQuarterSizeMin && quarter3size < expectedQuarterSizeMax, format("quarter3size is %s, should be between %s and %s", quarter3size, expectedQuarterSizeMin, expectedQuarterSizeMax));
+        assertTrue(quarter4size > expectedQuarterSizeMin && quarter4size < expectedQuarterSizeMax, format("quarter4size is %s, should be between %s and %s", quarter4size, expectedQuarterSizeMin, expectedQuarterSizeMax));
+        assertEquals(quarter1size + quarter2size + quarter3size + quarter4size, sizeInBytes);
     }
 
     private static InterleavedBlockBuilder createBlockBuilderWithValues(Slice[] expectedValues)
@@ -167,6 +200,19 @@ public class TestInterleavedBlock
         else {
             throw new IllegalArgumentException("Unsupported type " + type);
         }
+    }
+
+    @Override
+    protected List<Block> splitBlock(Block block, int count)
+    {
+        double entriesPerSplit = block.getPositionCount() * 1.0 / count / COLUMN_COUNT;
+        ImmutableList.Builder<Block> result = ImmutableList.builder();
+        for (int i = 0; i < count; i++) {
+            int startPosition = toIntExact(Math.round(entriesPerSplit * i) * COLUMN_COUNT);
+            int endPosition = toIntExact(Math.round(entriesPerSplit * (i + 1)) * COLUMN_COUNT);
+            result.add(block.getRegion(startPosition, endPosition - startPosition));
+        }
+        return result.build();
     }
 
     @Override

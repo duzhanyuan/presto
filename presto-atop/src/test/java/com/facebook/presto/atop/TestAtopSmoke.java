@@ -11,7 +11,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.facebook.presto.atop;
 
 import com.facebook.presto.testing.MaterializedResult;
@@ -49,6 +48,12 @@ public class TestAtopSmoke
     public void testDisks()
     {
         assertThatQueryReturnsValue("SELECT device_name FROM disks LIMIT 1", "sda");
+    }
+
+    @Test
+    public void testPredicatePushdown()
+    {
+        assertThatQueryReturnsValue("SELECT device_name FROM disks WHERE start_time < current_timestamp LIMIT 1", "sda");
     }
 
     @Test

@@ -24,6 +24,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.function.Consumer;
@@ -89,15 +90,17 @@ public final class DatabaseUtil
             task.run();
         }
         catch (RuntimeException e) {
-            for (Throwable throwable : Throwables.getCausalChain(e)) {
-                if (throwable instanceof SQLException) {
-                    String state = ((SQLException) throwable).getSQLState();
-                    if (state != null && state.startsWith("23")) {
-                        return;
-                    }
-                }
+            if (!sqlCodeStartsWith(e, "23")) {
+                throw e;
             }
-            throw e;
+        }
+    }
+
+    public static void enableStreamingResults(Statement statement)
+            throws SQLException
+    {
+        if (statement.isWrapperFor(com.mysql.jdbc.Statement.class)) {
+            statement.unwrap(com.mysql.jdbc.Statement.class).enableStreamingResults();
         }
     }
 
@@ -124,5 +127,23 @@ public final class DatabaseUtil
         else {
             statement.setNull(index, INTEGER);
         }
+    }
+
+    public static boolean isSyntaxOrAccessError(Exception e)
+    {
+        return sqlCodeStartsWith(e, "42");
+    }
+
+    private static boolean sqlCodeStartsWith(Exception e, String code)
+    {
+        for (Throwable throwable : Throwables.getCausalChain(e)) {
+            if (throwable instanceof SQLException) {
+                String state = ((SQLException) throwable).getSQLState();
+                if (state != null && state.startsWith(code)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

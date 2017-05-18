@@ -15,9 +15,10 @@ package com.facebook.presto.execution;
 
 import com.facebook.presto.SessionRepresentation;
 import com.facebook.presto.client.FailureInfo;
-import com.facebook.presto.memory.MemoryPoolId;
 import com.facebook.presto.spi.ErrorCode;
 import com.facebook.presto.spi.ErrorType;
+import com.facebook.presto.spi.QueryId;
+import com.facebook.presto.spi.memory.MemoryPoolId;
 import com.facebook.presto.transaction.TransactionId;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -62,6 +63,9 @@ public class QueryInfo
     private final ErrorType errorType;
     private final ErrorCode errorCode;
     private final Set<Input> inputs;
+    private final Optional<Output> output;
+    private final boolean completeInfo;
+    private final Optional<String> resourceGroupName;
 
     @JsonCreator
     public QueryInfo(
@@ -84,7 +88,10 @@ public class QueryInfo
             @JsonProperty("outputStage") Optional<StageInfo> outputStage,
             @JsonProperty("failureInfo") FailureInfo failureInfo,
             @JsonProperty("errorCode") ErrorCode errorCode,
-            @JsonProperty("inputs") Set<Input> inputs)
+            @JsonProperty("inputs") Set<Input> inputs,
+            @JsonProperty("output") Optional<Output> output,
+            @JsonProperty("completeInfo") boolean completeInfo,
+            @JsonProperty("resourceGroupName") Optional<String> resourceGroupName)
     {
         requireNonNull(queryId, "queryId is null");
         requireNonNull(session, "session is null");
@@ -100,6 +107,8 @@ public class QueryInfo
         requireNonNull(query, "query is null");
         requireNonNull(outputStage, "outputStage is null");
         requireNonNull(inputs, "inputs is null");
+        requireNonNull(output, "output is null");
+        requireNonNull(resourceGroupName, "resourceGroupName is null");
 
         this.queryId = queryId;
         this.session = session;
@@ -122,6 +131,9 @@ public class QueryInfo
         this.errorType = errorCode == null ? null : errorCode.getType();
         this.errorCode = errorCode;
         this.inputs = ImmutableSet.copyOf(inputs);
+        this.output = output;
+        this.completeInfo = completeInfo;
+        this.resourceGroupName = resourceGroupName;
     }
 
     @JsonProperty
@@ -260,6 +272,18 @@ public class QueryInfo
         return inputs;
     }
 
+    @JsonProperty
+    public Optional<Output> getOutput()
+    {
+        return output;
+    }
+
+    @JsonProperty
+    public Optional<String> getResourceGroupName()
+    {
+        return resourceGroupName;
+    }
+
     @Override
     public String toString()
     {
@@ -268,5 +292,10 @@ public class QueryInfo
                 .add("state", state)
                 .add("fieldNames", fieldNames)
                 .toString();
+    }
+
+    public boolean isCompleteInfo()
+    {
+        return completeInfo;
     }
 }

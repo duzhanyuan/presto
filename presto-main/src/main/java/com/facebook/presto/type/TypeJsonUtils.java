@@ -35,6 +35,7 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
@@ -44,9 +45,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static com.facebook.presto.spi.type.RealType.REAL;
 import static com.fasterxml.jackson.core.JsonFactory.Feature.CANONICALIZE_FIELD_NAMES;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static java.lang.Float.floatToRawIntBits;
 import static java.util.Objects.requireNonNull;
 
 public final class TypeJsonUtils
@@ -66,7 +69,7 @@ public final class TypeJsonUtils
             return null;
         }
 
-        try (JsonParser jsonParser = JSON_FACTORY.createParser(value.getInput())) {
+        try (JsonParser jsonParser = JSON_FACTORY.createParser((InputStream) value.getInput())) {
             jsonParser.nextToken();
             return stackRepresentationToObjectHelper(session, jsonParser, type);
         }
@@ -146,7 +149,12 @@ public final class TypeJsonUtils
             type.writeBoolean(blockBuilder, parser.getBooleanValue());
         }
         else if (type.getJavaType() == long.class) {
-            type.writeLong(blockBuilder, parser.getLongValue());
+            if (type.equals(REAL)) {
+                type.writeLong(blockBuilder, floatToRawIntBits(parser.getFloatValue()));
+            }
+            else {
+                type.writeLong(blockBuilder, parser.getLongValue());
+            }
         }
         else if (type.getJavaType() == double.class) {
             type.writeDouble(blockBuilder, getDoubleValue(parser));
@@ -219,6 +227,7 @@ public final class TypeJsonUtils
                 baseType.equals(StandardTypes.INTEGER) ||
                 baseType.equals(StandardTypes.BIGINT) ||
                 baseType.equals(StandardTypes.DOUBLE) ||
+                baseType.equals(StandardTypes.REAL) ||
                 baseType.equals(StandardTypes.VARCHAR) ||
                 baseType.equals(StandardTypes.DECIMAL) ||
                 baseType.equals(StandardTypes.JSON)) {
@@ -242,6 +251,7 @@ public final class TypeJsonUtils
                 baseType.equals(StandardTypes.INTEGER) ||
                 baseType.equals(StandardTypes.BIGINT) ||
                 baseType.equals(StandardTypes.DOUBLE) ||
+                baseType.equals(StandardTypes.REAL) ||
                 baseType.equals(StandardTypes.DECIMAL) ||
                 baseType.equals(StandardTypes.VARCHAR);
     }
@@ -283,6 +293,9 @@ public final class TypeJsonUtils
         else if (javaType == long.class) {
             if (element instanceof SqlDecimal) {
                 type.writeLong(blockBuilder, ((SqlDecimal) element).getUnscaledValue().longValue());
+            }
+            else if (REAL.equals(type)) {
+                type.writeLong(blockBuilder, floatToRawIntBits(((Number) element).floatValue()));
             }
             else {
                 type.writeLong(blockBuilder, ((Number) element).longValue());

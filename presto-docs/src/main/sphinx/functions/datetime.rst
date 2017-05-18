@@ -65,6 +65,11 @@ Date and Time Functions
 
     Returns the UNIX timestamp ``unixtime`` as a timestamp.
 
+.. function:: from_unixtime(unixtime, string) -> timestamp with time zone
+
+    Returns the UNIX timestamp ``unixtime`` as a timestamp with time zone
+    using ``string`` for the time zone.
+
 .. function:: from_unixtime(unixtime, hours, minutes) -> timestamp with time zone
 
     Returns the UNIX timestamp ``unixtime`` as a timestamp with time zone
@@ -151,6 +156,12 @@ Unit              Description
 
     Returns ``timestamp2 - timestamp1`` expressed in terms of ``unit``.
 
+.. function:: parse_duration(string) ->  Interval
+
+    Parses ``string`` of format ``value unit`` into an interval, where
+    ``value`` is a numeric of type double and ``unit`` is one of the values
+    (``ns``, ``us``, ``ms``, ``s``, ``m``, ``h``, ``d``)
+
 MySQL Date Functions
 --------------------
 
@@ -199,7 +210,7 @@ Specifier Description
 .. [#f] Timestamp is truncated to milliseconds.
 .. [#y] When parsing, two-digit year format assumes range ``1970`` .. ``2069``, so "70" will result in year ``1970`` but "69" will produce ``2069``.
 
-.. warning:: The following specifiers are not currently supported: ``%D %U %u %V %X``
+.. warning:: The following specifiers are not currently supported: ``%D %U %u %V %w %X``
 
 .. function:: date_format(timestamp, format) -> varchar
 

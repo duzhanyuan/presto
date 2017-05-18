@@ -26,11 +26,12 @@ import com.facebook.presto.spi.block.SortOrder;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.type.Type;
 import com.google.common.collect.ImmutableList;
-import com.google.inject.Inject;
 import io.airlift.stats.CounterStat;
 import io.airlift.stats.DistributionStat;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
+
+import javax.inject.Inject;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -45,6 +46,7 @@ import java.util.UUID;
 
 import static com.facebook.presto.raptor.storage.Row.extractRow;
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.units.Duration.nanosSince;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
@@ -75,7 +77,7 @@ public final class ShardCompactor
         List<Long> columnIds = columns.stream().map(ColumnInfo::getColumnId).collect(toList());
         List<Type> columnTypes = columns.stream().map(ColumnInfo::getType).collect(toList());
 
-        StoragePageSink storagePageSink = storageManager.createStoragePageSink(transactionId, bucketNumber, columnIds, columnTypes);
+        StoragePageSink storagePageSink = storageManager.createStoragePageSink(transactionId, bucketNumber, columnIds, columnTypes, false);
 
         List<ShardInfo> shardInfos;
         try {
@@ -107,7 +109,7 @@ public final class ShardCompactor
                 }
             }
         }
-        return storagePageSink.commit();
+        return getFutureValue(storagePageSink.commit());
     }
 
     public List<ShardInfo> compactSorted(long transactionId, OptionalInt bucketNumber, Set<UUID> uuids, List<ColumnInfo> columns, List<Long> sortColumnIds, List<SortOrder> sortOrders)
@@ -127,7 +129,7 @@ public final class ShardCompactor
                 .collect(toList());
 
         Queue<SortedRowSource> rowSources = new PriorityQueue<>();
-        StoragePageSink outputPageSink = storageManager.createStoragePageSink(transactionId, bucketNumber, columnIds, columnTypes);
+        StoragePageSink outputPageSink = storageManager.createStoragePageSink(transactionId, bucketNumber, columnIds, columnTypes, false);
         try {
             for (UUID uuid : uuids) {
                 ConnectorPageSource pageSource = storageManager.getPageSource(uuid, bucketNumber, columnIds, columnTypes, TupleDomain.all(), readerAttributes);
@@ -151,7 +153,7 @@ public final class ShardCompactor
                 rowSources.add(rowSource);
             }
             outputPageSink.flush();
-            List<ShardInfo> shardInfos = outputPageSink.commit();
+            List<ShardInfo> shardInfos = getFutureValue(outputPageSink.commit());
 
             updateStats(uuids.size(), shardInfos.size(), nanosSince(start).toMillis());
 
@@ -162,7 +164,7 @@ public final class ShardCompactor
             throw e;
         }
         finally {
-            rowSources.stream().forEach(SortedRowSource::closeQuietly);
+            rowSources.forEach(SortedRowSource::closeQuietly);
         }
     }
 

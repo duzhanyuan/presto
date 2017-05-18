@@ -22,13 +22,12 @@ import com.facebook.presto.spi.NodeManager;
 import com.facebook.presto.spi.connector.ConnectorSplitManager;
 import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
 import com.facebook.presto.spi.predicate.TupleDomain;
-import com.google.inject.Inject;
+
+import javax.inject.Inject;
 
 import java.util.List;
 import java.util.stream.Collectors;
 
-import static com.facebook.presto.localfile.Types.checkType;
-import static com.facebook.presto.spi.NodeState.ACTIVE;
 import static java.util.Objects.requireNonNull;
 
 public class LocalFileSplitManager
@@ -45,14 +44,13 @@ public class LocalFileSplitManager
     @Override
     public ConnectorSplitSource getSplits(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorTableLayoutHandle layout)
     {
-        LocalFileTableLayoutHandle layoutHandle = checkType(layout, LocalFileTableLayoutHandle.class, "layout");
+        LocalFileTableLayoutHandle layoutHandle = (LocalFileTableLayoutHandle) layout;
         LocalFileTableHandle tableHandle = layoutHandle.getTable();
 
         TupleDomain<LocalFileColumnHandle> effectivePredicate = layoutHandle.getConstraint()
-                .transform(handle -> checkType(handle, LocalFileColumnHandle.class, "columnHandle"));
+                .transform(LocalFileColumnHandle.class::cast);
 
-        List<ConnectorSplit> splits = nodeManager.getNodes(ACTIVE).stream()
-                .filter(node -> !nodeManager.getCoordinators().contains(node))
+        List<ConnectorSplit> splits = nodeManager.getAllNodes().stream()
                 .map(node -> new LocalFileSplit(node.getHostAndPort(), tableHandle.getSchemaTableName(), effectivePredicate))
                 .collect(Collectors.toList());
 

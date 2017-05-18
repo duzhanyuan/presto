@@ -14,11 +14,15 @@
 package com.facebook.presto.sql.planner.assertions;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.cost.PlanNodeCost;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.SemiJoinNode;
-import com.google.common.base.MoreObjects;
 
+import static com.facebook.presto.sql.planner.assertions.MatchResult.NO_MATCH;
+import static com.facebook.presto.sql.planner.assertions.MatchResult.match;
+import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
 
 final class SemiJoinMatcher
@@ -36,22 +40,29 @@ final class SemiJoinMatcher
     }
 
     @Override
-    public boolean matches(PlanNode node, Session session, Metadata metadata, SymbolAliases symbolAliases)
+    public boolean shapeMatches(PlanNode node)
     {
-        if (node instanceof SemiJoinNode) {
-            SemiJoinNode semiJoinNode = (SemiJoinNode) node;
-            symbolAliases.put(sourceSymbolAlias, semiJoinNode.getSourceJoinSymbol());
-            symbolAliases.put(filteringSymbolAlias, semiJoinNode.getFilteringSourceJoinSymbol());
-            symbolAliases.put(outputAlias, semiJoinNode.getSemiJoinOutput());
-            return true;
+        return node instanceof SemiJoinNode;
+    }
+
+    @Override
+    public MatchResult detailMatches(PlanNode node, PlanNodeCost cost, Session session, Metadata metadata, SymbolAliases symbolAliases)
+    {
+        checkState(shapeMatches(node), "Plan testing framework error: shapeMatches returned false in detailMatches in %s", this.getClass().getName());
+
+        SemiJoinNode semiJoinNode = (SemiJoinNode) node;
+        if (!(symbolAliases.get(sourceSymbolAlias).equals(semiJoinNode.getSourceJoinSymbol().toSymbolReference()) &&
+                symbolAliases.get(filteringSymbolAlias).equals(semiJoinNode.getFilteringSourceJoinSymbol().toSymbolReference()))) {
+            return NO_MATCH;
         }
-        return false;
+
+        return match(outputAlias, semiJoinNode.getSemiJoinOutput().toSymbolReference());
     }
 
     @Override
     public String toString()
     {
-        return MoreObjects.toStringHelper(this)
+        return toStringHelper(this)
                 .add("filteringSymbolAlias", filteringSymbolAlias)
                 .add("sourceSymbolAlias", sourceSymbolAlias)
                 .add("outputAlias", outputAlias)

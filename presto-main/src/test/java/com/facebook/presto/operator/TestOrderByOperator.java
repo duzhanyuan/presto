@@ -53,7 +53,7 @@ public class TestOrderByOperator
     {
         executor = newCachedThreadPool(daemonThreadsNamed("test-%s"));
         driverContext = createTaskContext(executor, TEST_SESSION)
-                .addPipelineContext(true, true)
+                .addPipelineContext(0, true, true)
                 .addDriverContext();
     }
 
@@ -82,9 +82,8 @@ public class TestOrderByOperator
                 ImmutableList.of(1),
                 10,
                 ImmutableList.of(0),
-                ImmutableList.of(ASC_NULLS_LAST));
-
-        Operator operator = operatorFactory.createOperator(driverContext);
+                ImmutableList.of(ASC_NULLS_LAST),
+                new PagesIndex.TestingFactory());
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), DOUBLE)
                 .row(-0.1)
@@ -93,7 +92,7 @@ public class TestOrderByOperator
                 .row(0.4)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
@@ -115,9 +114,8 @@ public class TestOrderByOperator
                 ImmutableList.of(0, 1),
                 10,
                 ImmutableList.of(0, 1),
-                ImmutableList.of(ASC_NULLS_LAST, DESC_NULLS_LAST));
-
-        Operator operator = operatorFactory.createOperator(driverContext);
+                ImmutableList.of(ASC_NULLS_LAST, DESC_NULLS_LAST),
+                new PagesIndex.TestingFactory());
 
         MaterializedResult expected = MaterializedResult.resultBuilder(driverContext.getSession(), VARCHAR, BIGINT)
                 .row("a", 4L)
@@ -126,7 +124,7 @@ public class TestOrderByOperator
                 .row("b", 2L)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test
@@ -148,9 +146,8 @@ public class TestOrderByOperator
                 ImmutableList.of(0),
                 10,
                 ImmutableList.of(0),
-                ImmutableList.of(DESC_NULLS_LAST));
-
-        Operator operator = operatorFactory.createOperator(driverContext);
+                ImmutableList.of(DESC_NULLS_LAST),
+                new PagesIndex.TestingFactory());
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT)
                 .row(4L)
@@ -159,7 +156,7 @@ public class TestOrderByOperator
                 .row(-1L)
                 .build();
 
-        assertOperatorEquals(operator, input, expected);
+        assertOperatorEquals(operatorFactory, driverContext, input, expected);
     }
 
     @Test(expectedExceptions = ExceededMemoryLimitException.class, expectedExceptionsMessageRegExp = "Query exceeded local memory limit of 10B")
@@ -175,7 +172,7 @@ public class TestOrderByOperator
                 .build();
 
         DriverContext driverContext = createTaskContext(executor, TEST_SESSION, new DataSize(10, Unit.BYTE))
-                .addPipelineContext(true, true)
+                .addPipelineContext(0, true, true)
                 .addDriverContext();
 
         OrderByOperatorFactory operatorFactory = new OrderByOperatorFactory(
@@ -185,10 +182,9 @@ public class TestOrderByOperator
                 ImmutableList.of(1),
                 10,
                 ImmutableList.of(0),
-                ImmutableList.of(ASC_NULLS_LAST));
+                ImmutableList.of(ASC_NULLS_LAST),
+                new PagesIndex.TestingFactory());
 
-        Operator operator = operatorFactory.createOperator(driverContext);
-
-        toPages(operator, input);
+        toPages(operatorFactory, driverContext, input);
     }
 }

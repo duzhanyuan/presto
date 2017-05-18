@@ -31,6 +31,7 @@ import com.facebook.presto.sql.tree.AstVisitor;
 import com.facebook.presto.sql.tree.BinaryLiteral;
 import com.facebook.presto.sql.tree.BooleanLiteral;
 import com.facebook.presto.sql.tree.Cast;
+import com.facebook.presto.sql.tree.CharLiteral;
 import com.facebook.presto.sql.tree.DecimalLiteral;
 import com.facebook.presto.sql.tree.DoubleLiteral;
 import com.facebook.presto.sql.tree.Expression;
@@ -59,8 +60,8 @@ import static com.facebook.presto.metadata.FunctionKind.SCALAR;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
-import static com.facebook.presto.spi.type.FloatType.FLOAT;
 import static com.facebook.presto.spi.type.IntegerType.INTEGER;
+import static com.facebook.presto.spi.type.RealType.REAL;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.INVALID_LITERAL;
@@ -136,35 +137,35 @@ public final class LiteralInterpreter
             Double value = (Double) object;
             // WARNING: the ORC predicate code depends on NaN and infinity not appearing in a tuple domain, so
             // if you remove this, you will need to update the TupleDomainOrcPredicate
-            // When changing this, don't forget about similar code for FLOAT below
+            // When changing this, don't forget about similar code for REAL below
             if (value.isNaN()) {
-                return new FunctionCall(QualifiedName.of("nan"), ImmutableList.<Expression>of());
+                return new FunctionCall(QualifiedName.of("nan"), ImmutableList.of());
             }
             else if (value.equals(Double.NEGATIVE_INFINITY)) {
-                return ArithmeticUnaryExpression.negative(new FunctionCall(QualifiedName.of("infinity"), ImmutableList.<Expression>of()));
+                return ArithmeticUnaryExpression.negative(new FunctionCall(QualifiedName.of("infinity"), ImmutableList.of()));
             }
             else if (value.equals(Double.POSITIVE_INFINITY)) {
-                return new FunctionCall(QualifiedName.of("infinity"), ImmutableList.<Expression>of());
+                return new FunctionCall(QualifiedName.of("infinity"), ImmutableList.of());
             }
             else {
                 return new DoubleLiteral(object.toString());
             }
         }
 
-        if (type.equals(FLOAT)) {
+        if (type.equals(REAL)) {
             Float value = intBitsToFloat(((Long) object).intValue());
             // WARNING for ORC predicate code as above (for double)
             if (value.isNaN()) {
-                return new Cast(new FunctionCall(QualifiedName.of("nan"), ImmutableList.of()), StandardTypes.FLOAT);
+                return new Cast(new FunctionCall(QualifiedName.of("nan"), ImmutableList.of()), StandardTypes.REAL);
             }
             else if (value.equals(Float.NEGATIVE_INFINITY)) {
-                return ArithmeticUnaryExpression.negative(new Cast(new FunctionCall(QualifiedName.of("infinity"), ImmutableList.of()), StandardTypes.FLOAT));
+                return ArithmeticUnaryExpression.negative(new Cast(new FunctionCall(QualifiedName.of("infinity"), ImmutableList.of()), StandardTypes.REAL));
             }
             else if (value.equals(Float.POSITIVE_INFINITY)) {
-                return new Cast(new FunctionCall(QualifiedName.of("infinity"), ImmutableList.of()), StandardTypes.FLOAT);
+                return new Cast(new FunctionCall(QualifiedName.of("infinity"), ImmutableList.of()), StandardTypes.REAL);
             }
             else {
-                return new GenericLiteral("FLOAT", value.toString());
+                return new GenericLiteral("REAL", value.toString());
             }
         }
 
@@ -260,6 +261,12 @@ public final class LiteralInterpreter
         }
 
         @Override
+        protected Object visitCharLiteral(CharLiteral node, ConnectorSession context)
+        {
+            return node.getSlice();
+        }
+
+        @Override
         protected Slice visitBinaryLiteral(BinaryLiteral node, ConnectorSession session)
         {
             return node.getValue();
@@ -276,7 +283,7 @@ public final class LiteralInterpreter
             if (JSON.equals(type)) {
                 ScalarFunctionImplementation operator = metadata.getFunctionRegistry().getScalarFunctionImplementation(new Signature("json_parse", SCALAR, JSON.getTypeSignature(), VARCHAR.getTypeSignature()));
                 try {
-                    return ExpressionInterpreter.invoke(session, operator, ImmutableList.<Object>of(utf8Slice(node.getValue())));
+                    return ExpressionInterpreter.invoke(session, operator, ImmutableList.of(utf8Slice(node.getValue())));
                 }
                 catch (Throwable throwable) {
                     throw Throwables.propagate(throwable);
@@ -292,7 +299,7 @@ public final class LiteralInterpreter
                 throw new SemanticException(TYPE_MISMATCH, node, "No literal form for type %s", type);
             }
             try {
-                return ExpressionInterpreter.invoke(session, operator, ImmutableList.<Object>of(utf8Slice(node.getValue())));
+                return ExpressionInterpreter.invoke(session, operator, ImmutableList.of(utf8Slice(node.getValue())));
             }
             catch (Throwable throwable) {
                 throw Throwables.propagate(throwable);

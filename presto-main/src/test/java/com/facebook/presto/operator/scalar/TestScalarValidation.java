@@ -14,9 +14,14 @@
 package com.facebook.presto.operator.scalar;
 
 import com.facebook.presto.metadata.FunctionListBuilder;
+import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.function.IsNull;
 import com.facebook.presto.spi.function.ScalarFunction;
+import com.facebook.presto.spi.function.SqlNullable;
 import com.facebook.presto.spi.function.SqlType;
+import com.facebook.presto.spi.function.TypeParameter;
 import com.facebook.presto.spi.type.StandardTypes;
+import com.facebook.presto.spi.type.Type;
 import org.testng.annotations.Test;
 
 import javax.annotation.Nullable;
@@ -72,7 +77,7 @@ public class TestScalarValidation
         public static void bad() {}
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has wrapper return type Long but is missing @Nullable")
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has wrapper return type Long but is missing @SqlNullable")
     public void testPrimitiveWrapperReturnWithoutNullable()
     {
         extractScalars(PrimitiveWrapperReturnWithoutNullable.class);
@@ -88,7 +93,7 @@ public class TestScalarValidation
         }
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* annotated with @Nullable has primitive return type long")
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* annotated with @SqlNullable has primitive return type long")
     public void testPrimitiveReturnWithNullable()
     {
         extractScalars(PrimitiveReturnWithNullable.class);
@@ -96,9 +101,8 @@ public class TestScalarValidation
 
     public static final class PrimitiveReturnWithNullable
     {
-        @SuppressWarnings("NullableProblems")
         @ScalarFunction
-        @Nullable
+        @SqlNullable
         @SqlType(StandardTypes.BIGINT)
         public static long bad()
         {
@@ -106,7 +110,7 @@ public class TestScalarValidation
         }
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has parameter with wrapper type Boolean that is missing @Nullable")
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has parameter with wrapper type Boolean that is missing @SqlNullable")
     public void testPrimitiveWrapperParameterWithoutNullable()
     {
         extractScalars(PrimitiveWrapperParameterWithoutNullable.class);
@@ -122,7 +126,7 @@ public class TestScalarValidation
         }
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has parameter with primitive type double annotated with @Nullable")
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has parameter with primitive type double annotated with @SqlNullable")
     public void testPrimitiveParameterWithNullable()
     {
         extractScalars(PrimitiveParameterWithNullable.class);
@@ -130,10 +134,9 @@ public class TestScalarValidation
 
     public static final class PrimitiveParameterWithNullable
     {
-        @SuppressWarnings("NullableProblems")
         @ScalarFunction
         @SqlType(StandardTypes.BIGINT)
-        public static long bad(@Nullable @SqlType(StandardTypes.DOUBLE) double primitive)
+        public static long bad(@SqlNullable @SqlType(StandardTypes.DOUBLE) double primitive)
         {
             return 0;
         }
@@ -169,6 +172,211 @@ public class TestScalarValidation
         {
             return 0;
         }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* is annotated with @Nullable but not @SqlNullable")
+    public void testMethodWithLegacyNullable()
+    {
+        extractScalars(MethodWithLegacyNullable.class);
+    }
+
+    public static final class MethodWithLegacyNullable
+    {
+        @ScalarFunction
+        @Nullable
+        @SqlType(StandardTypes.BIGINT)
+        public static Long bad()
+        {
+            return 0L;
+        }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has parameter annotated with @Nullable but not @SqlNullable")
+    public void testParameterWithLegacyNullable()
+    {
+        extractScalars(ParameterWithLegacyNullable.class);
+    }
+
+    public static final class ParameterWithLegacyNullable
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        public static long bad(@Nullable @SqlType(StandardTypes.DOUBLE) Double value)
+        {
+            return 0;
+        }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has @IsNull parameter that does not follow a @SqlType parameter")
+    public void testParameterWithConnectorAndIsNull()
+    {
+        extractScalars(ParameterWithConnectorAndIsNull.class);
+    }
+
+    public static final class ParameterWithConnectorAndIsNull
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        public static long bad(ConnectorSession session, @IsNull boolean isNull)
+        {
+            return 0;
+        }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has @IsNull parameter that does not follow a @SqlType parameter")
+    public void testParameterWithOnlyIsNull()
+    {
+        extractScalars(ParameterWithOnlyIsNull.class);
+    }
+
+    public static final class ParameterWithOnlyIsNull
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        public static long bad(@IsNull boolean isNull)
+        {
+            return 0;
+        }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has non-boolean parameter with @IsNull")
+    public void testParameterWithNonBooleanIsNull()
+    {
+        extractScalars(ParameterWithNonBooleanIsNull.class);
+    }
+
+    public static final class ParameterWithNonBooleanIsNull
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        public static long bad(@SqlType(StandardTypes.BIGINT) long value, @IsNull int isNull)
+        {
+            return 0;
+        }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* uses @IsNull following a parameter with boxed primitive type: Long")
+    public void testParameterWithBoxedPrimitiveIsNull()
+    {
+        extractScalars(ParameterWithBoxedPrimitiveIsNull.class);
+    }
+
+    public static final class ParameterWithBoxedPrimitiveIsNull
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        public static long bad(@SqlNullable @SqlType(StandardTypes.BIGINT) Long value, @IsNull boolean isNull)
+        {
+            return 0;
+        }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Method .* has @IsNull parameter that has other annotations")
+    public void testParameterWithOtherAnnotationsWithIsNull()
+    {
+        extractScalars(ParameterWithOtherAnnotationsWithIsNull.class);
+    }
+
+    public static final class ParameterWithOtherAnnotationsWithIsNull
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        public static long bad(@SqlType(StandardTypes.BIGINT) long value, @IsNull @SqlNullable boolean isNull)
+        {
+            return 0;
+        }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Expected type parameter to only contain A-Z and 0-9 \\(starting with A-Z\\), but got bad on method .*")
+    public void testNonUpperCaseTypeParameters()
+    {
+        extractScalars(TypeParameterWithNonUpperCaseAnnotation.class);
+    }
+
+    public static final class TypeParameterWithNonUpperCaseAnnotation
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        @TypeParameter("bad")
+        public static long bad(@TypeParameter("array(bad)") Type type, @SqlType(StandardTypes.BIGINT) long value)
+        {
+            return value;
+        }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Expected type parameter to only contain A-Z and 0-9 \\(starting with A-Z\\), but got 1E on method .*")
+    public void testLeadingNumericTypeParameters()
+    {
+        extractScalars(TypeParameterWithLeadingNumbers.class);
+    }
+
+    public static final class TypeParameterWithLeadingNumbers
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        @TypeParameter("1E")
+        public static long bad(@TypeParameter("array(1E)") Type type, @SqlType(StandardTypes.BIGINT) long value)
+        {
+            return value;
+        }
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Expected type parameter not to take parameters, but got E on method .*")
+    public void testNonPrimitiveTypeParameters()
+    {
+        extractScalars(TypeParameterWithNonPrimitiveAnnotation.class);
+    }
+
+    public static final class TypeParameterWithNonPrimitiveAnnotation
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        @TypeParameter("E")
+        public static long bad(@TypeParameter("E(VARCHAR)") Type type, @SqlType(StandardTypes.BIGINT) long value)
+        {
+            return value;
+        }
+    }
+
+    @Test
+    public void testValidTypeParameters()
+    {
+        extractScalars(ValidTypeParameter.class);
+    }
+
+    public static final class ValidTypeParameter
+    {
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        public static long good1(
+                @TypeParameter("ROW(ARRAY(BIGINT),MAP(INTEGER,DECIMAL),SMALLINT,CHAR,BOOLEAN,DATE,TIMESTAMP,VARCHAR)") Type type,
+                @SqlType(StandardTypes.BIGINT) long value)
+        {
+            return value;
+        }
+
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        @TypeParameter("E12")
+        @TypeParameter("F34")
+        public static long good2(
+                @TypeParameter("ROW(ARRAY(E12),JSON,TIME,VARBINARY,ROW(ROW(F34)))") Type type,
+                @SqlType(StandardTypes.BIGINT) long value)
+        {
+            return value;
+        }
+    }
+
+    @Test
+    public void testValidTypeParametersForConstructors()
+    {
+        extractScalars(ConstructorWithValidTypeParameters.class);
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class, expectedExceptionsMessageRegExp = "Expected type parameter not to take parameters, but got K on method .*")
+    public void testInvalidTypeParametersForConstructors()
+    {
+        extractScalars(ConstructorWithInvalidTypeParameters.class);
     }
 
     private static void extractParametricScalar(Class<?> clazz)

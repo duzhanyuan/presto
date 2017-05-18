@@ -13,10 +13,11 @@
  */
 package com.facebook.presto.raptor.metadata;
 
+import com.facebook.presto.client.NodeVersion;
+import com.facebook.presto.metadata.PrestoNode;
 import com.facebook.presto.raptor.NodeSupplier;
 import com.facebook.presto.raptor.RaptorColumnHandle;
 import com.facebook.presto.raptor.util.DaoSupplier;
-import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.Node;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.predicate.Domain;
@@ -45,6 +46,9 @@ import org.testng.annotations.Test;
 
 import java.io.File;
 import java.net.URI;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.ZonedDateTime;
 import java.util.Collection;
@@ -59,6 +63,8 @@ import java.util.Set;
 import java.util.UUID;
 
 import static com.facebook.presto.raptor.RaptorErrorCode.RAPTOR_EXTERNAL_BATCH_ALREADY_EXISTS;
+import static com.facebook.presto.raptor.metadata.DatabaseShardManager.shardIndexTable;
+import static com.facebook.presto.raptor.metadata.SchemaDaoUtil.createTablesWithRetry;
 import static com.facebook.presto.raptor.storage.ShardStats.MAX_BINARY_INDEX_SIZE;
 import static com.facebook.presto.spi.StandardErrorCode.SERVER_STARTING_UP;
 import static com.facebook.presto.spi.StandardErrorCode.TRANSACTION_CONFLICT;
@@ -78,6 +84,7 @@ import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.Iterators.concat;
 import static com.google.common.collect.Iterators.transform;
 import static io.airlift.slice.Slices.utf8Slice;
+import static java.lang.String.format;
 import static java.time.ZoneOffset.UTC;
 import static java.util.concurrent.TimeUnit.DAYS;
 import static java.util.stream.Collectors.toSet;
@@ -98,6 +105,7 @@ public class TestDatabaseShardManager
     {
         dbi = new DBI("jdbc:h2:mem:test" + System.nanoTime());
         dummyHandle = dbi.open();
+        createTablesWithRetry(dbi);
         dataDir = Files.createTempDir();
         shardManager = createShardManager(dbi);
     }
@@ -123,7 +131,7 @@ public class TestDatabaseShardManager
 
         List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
 
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, shards, Optional.empty(), 0);
@@ -139,7 +147,7 @@ public class TestDatabaseShardManager
         List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
         List<ShardInfo> shards = ImmutableList.of(shardInfo(UUID.randomUUID(), "node1"));
 
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.rollbackTransaction(transactionId);
@@ -161,7 +169,7 @@ public class TestDatabaseShardManager
         List<ShardInfo> shardNodes = ImmutableList.of(shardInfo(shard, "node1"));
         List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
 
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, shardNodes, Optional.empty(), 0);
@@ -209,7 +217,7 @@ public class TestDatabaseShardManager
                 new ShardInfo(shard2, bucketNumber, ImmutableSet.of("node1"), ImmutableList.of(), 5, 55, 555));
         List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
 
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, shardNodes, Optional.empty(), 0);
@@ -245,7 +253,7 @@ public class TestDatabaseShardManager
             inputShards.add(shardInfo(uuid, node));
         }
 
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, inputShards.build(), Optional.empty(), 0);
@@ -268,7 +276,7 @@ public class TestDatabaseShardManager
         List<ShardInfo> shardNodes = ImmutableList.of(shardInfo(shard1, "node1"), shardInfo(shard2, "node1"));
         List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
 
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, shardNodes, Optional.empty(), 0);
@@ -292,7 +300,7 @@ public class TestDatabaseShardManager
                 .add(shardInfo(originalUuids.get(2), nodes.get(2)))
                 .build();
 
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, oldShards, Optional.empty(), 0);
@@ -349,7 +357,7 @@ public class TestDatabaseShardManager
         List<ShardInfo> shards = ImmutableList.of(shardInfo(UUID.randomUUID(), "node1"));
         List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
 
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, shards, externalBatchId, 0);
@@ -369,9 +377,9 @@ public class TestDatabaseShardManager
     @Test
     public void testBucketAssignments()
     {
-        Node node1 = new TestingNode();
-        Node node2 = new TestingNode();
-        Node node3 = new TestingNode();
+        Node node1 = createTestingNode();
+        Node node2 = createTestingNode();
+        Node node3 = createTestingNode();
 
         TestingTicker ticker = new TestingTicker();
         MetadataDao metadataDao = dbi.onDemand(MetadataDao.class);
@@ -409,7 +417,7 @@ public class TestDatabaseShardManager
     {
         long tableId = createTable("test");
         List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         try (ResultIterator<BucketShards> iterator = shardManager.getShardNodes(tableId, TupleDomain.all())) {
             assertFalse(iterator.hasNext());
@@ -421,11 +429,24 @@ public class TestDatabaseShardManager
     {
         long tableId = createTable("test");
         List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
-        shardManager.createTable(tableId, columns, true);
+        shardManager.createTable(tableId, columns, true, OptionalLong.empty());
 
         try (ResultIterator<BucketShards> iterator = shardManager.getShardNodesBucketed(tableId, true, ImmutableMap.of(), TupleDomain.all())) {
             assertFalse(iterator.hasNext());
         }
+    }
+
+    @Test
+    public void testTemporalColumnTableCreation()
+            throws Exception
+    {
+        long tableId = createTable("test");
+        List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, TIMESTAMP));
+        shardManager.createTable(tableId, columns, false, OptionalLong.of(1));
+
+        long tableId2 = createTable("test2");
+        List<ColumnInfo> columns2 = ImmutableList.of(new ColumnInfo(1, TIMESTAMP));
+        shardManager.createTable(tableId2, columns2, true, OptionalLong.of(1));
     }
 
     @Test
@@ -492,7 +513,7 @@ public class TestDatabaseShardManager
         RaptorColumnHandle c6 = new RaptorColumnHandle("raptor", "c6", 6, BOOLEAN);
 
         long tableId = createTable("test");
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, shards, Optional.empty(), 0);
@@ -574,7 +595,7 @@ public class TestDatabaseShardManager
         RaptorColumnHandle c1 = new RaptorColumnHandle("raptor", "c1", 1, createVarcharType(10));
 
         long tableId = createTable("test");
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, shards, Optional.empty(), 0);
@@ -610,13 +631,64 @@ public class TestDatabaseShardManager
         List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
         RaptorColumnHandle c1 = new RaptorColumnHandle("raptor", "c1", 1, BIGINT);
 
-        shardManager.createTable(tableId, columns, false);
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
 
         long transactionId = shardManager.beginTransaction();
         shardManager.commitShards(transactionId, tableId, columns, shards, Optional.empty(), 0);
 
         shardAssertion(tableId).expected(shards);
         shardAssertion(tableId).equal(c1, BIGINT, 3L).expected(shards);
+    }
+
+    @Test
+    public void testAddNewColumn()
+            throws Exception
+    {
+        long tableId = createTable("test");
+        List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
+        int before = columnCount(tableId);
+
+        ColumnInfo newColumn = new ColumnInfo(2, BIGINT);
+        shardManager.addColumn(tableId, newColumn);
+        int after = columnCount(tableId);
+        // should be 2 more: min and max columns
+        assertEquals(after, before + 2);
+    }
+
+    @Test
+    public void testAddDuplicateColumn()
+            throws Exception
+    {
+        long tableId = createTable("test");
+        List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
+        shardManager.createTable(tableId, columns, false, OptionalLong.empty());
+        int before = columnCount(tableId);
+
+        shardManager.addColumn(tableId, columns.get(0));
+        int after = columnCount(tableId);
+        // no error, no columns added
+        assertEquals(after, before);
+    }
+
+    @Test
+    public void testMaintenanceBlocked()
+    {
+        long tableId = createTable("test");
+        List<ColumnInfo> columns = ImmutableList.of(new ColumnInfo(1, BIGINT));
+        Set<UUID> oldShards = ImmutableSet.of(UUID.randomUUID());
+
+        dbi.onDemand(MetadataDao.class).blockMaintenance(tableId);
+
+        long transactionId = shardManager.beginTransaction();
+        try {
+            shardManager.replaceShardUuids(transactionId, tableId, columns, oldShards, ImmutableSet.of(), OptionalLong.empty());
+            fail("expected exception");
+        }
+        catch (PrestoException e) {
+            assertEquals(e.getErrorCode(), TRANSACTION_CONFLICT.toErrorCode());
+            assertEquals(e.getMessage(), "Maintenance is blocked for table");
+        }
     }
 
     private Set<ShardNodes> getShardNodes(long tableId, TupleDomain<RaptorColumnHandle> predicate)
@@ -651,6 +723,11 @@ public class TestDatabaseShardManager
     public static ShardManager createShardManager(IDBI dbi)
     {
         return createShardManager(dbi, ImmutableSet::of, systemTicker());
+    }
+
+    public static ShardManager createShardManager(IDBI dbi, NodeSupplier nodeSupplier)
+    {
+        return createShardManager(dbi, nodeSupplier, systemTicker());
     }
 
     public static ShardManager createShardManager(IDBI dbi, NodeSupplier nodeSupplier, Ticker ticker)
@@ -729,27 +806,18 @@ public class TestDatabaseShardManager
         return nodes.stream().map(Node::getNodeIdentifier).collect(toSet());
     }
 
-    private static class TestingNode
-            implements Node
+    private static Node createTestingNode()
     {
-        private final String nodeId = UUID.randomUUID().toString();
+        return new PrestoNode(UUID.randomUUID().toString(), URI.create("http://test"), NodeVersion.UNKNOWN, false);
+    }
 
-        @Override
-        public HostAddress getHostAndPort()
-        {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public URI getHttpUri()
-        {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public String getNodeIdentifier()
-        {
-            return nodeId;
+    private int columnCount(long tableId)
+            throws SQLException
+    {
+        try (Statement statement = dummyHandle.getConnection().createStatement()) {
+            try (ResultSet rs = statement.executeQuery(format("SELECT * FROM %s LIMIT 0", shardIndexTable(tableId)))) {
+                return rs.getMetaData().getColumnCount();
+            }
         }
     }
 }

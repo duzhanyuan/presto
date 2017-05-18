@@ -14,13 +14,16 @@
 package com.facebook.presto.type;
 
 import com.facebook.presto.operator.scalar.AbstractTestFunctions;
+import com.facebook.presto.spi.type.SqlTimestamp;
 import org.testng.annotations.Test;
 
+import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.spi.type.DecimalType.createDecimalType;
 import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
+import static com.facebook.presto.spi.type.RealType.REAL;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.facebook.presto.type.JsonType.JSON;
 import static java.lang.Double.NEGATIVE_INFINITY;
@@ -113,6 +116,34 @@ public class TestJsonOperators
     }
 
     @Test
+    public void testCastToReal()
+            throws Exception
+    {
+        assertFunction("cast(JSON 'null' as REAL)", REAL, null);
+        assertFunction("cast(JSON '-128' as REAL)", REAL, -128.0f);
+        assertFunction("cast(JSON '128' as REAL)", REAL, 128.0f);
+        assertFunction("cast(JSON '12345678901234567890' as REAL)", REAL, 1.2345679e19f);
+        assertFunction("cast(JSON '128.9' as REAL)", REAL, 128.9f);
+        assertFunction("cast(JSON '1e-46' as REAL)", REAL, 0.0f); // smaller than minimum subnormal positive
+        assertFunction("cast(JSON '1e39' as REAL)", REAL, Float.POSITIVE_INFINITY); // overflow
+        assertFunction("cast(JSON '-1e39' as REAL)", REAL, Float.NEGATIVE_INFINITY); // underflow
+        assertFunction("cast(JSON 'true' as REAL)", REAL, 1.0f);
+        assertFunction("cast(JSON 'false' as REAL)", REAL, 0.0f);
+        assertFunction("cast(JSON '\"128\"' as REAL)", REAL, 128.0f);
+        assertFunction("cast(JSON '\"12345678901234567890\"' as REAL)", REAL, 1.2345679e19f);
+        assertFunction("cast(JSON '\"128.9\"' as REAL)", REAL, 128.9f);
+        assertFunction("cast(JSON '\"NaN\"' as REAL)", REAL, Float.NaN);
+        assertFunction("cast(JSON '\"Infinity\"' as REAL)", REAL, Float.POSITIVE_INFINITY);
+        assertFunction("cast(JSON '\"-Infinity\"' as REAL)", REAL, Float.NEGATIVE_INFINITY);
+        assertInvalidFunction("cast(JSON '\"true\"' as REAL)", INVALID_CAST_ARGUMENT);
+
+        assertFunction("cast(JSON ' 128.9' as REAL)", REAL, 128.9f); // leading space
+
+        assertFunction("cast(json_extract('{\"x\":1.23}', '$.x') as REAL)", REAL, 1.23f);
+        assertInvalidCast("cast(JSON '{ \"x\" : 123}' as REAL)");
+    }
+
+    @Test
     public void testCastToDecimal()
             throws Exception
     {
@@ -132,7 +163,7 @@ public class TestJsonOperators
             throws Exception
     {
         assertFunction("cast(cast(null as decimal(5,2)) as JSON)", JSON, null);
-        assertFunction("cast(3.14 as JSON)", JSON, "3.14");
+        assertFunction("cast(DECIMAL '3.14' as JSON)", JSON, "3.14");
         assertFunction("cast(DECIMAL '12345678901234567890.123456789012345678' as JSON)", JSON, "12345678901234567890.123456789012345678");
     }
 
@@ -196,5 +227,17 @@ public class TestJsonOperators
         assertFunction("cast(cast (null as varchar) as JSON)", JSON, null);
         assertFunction("cast('abc' as JSON)", JSON, "\"abc\"");
         assertFunction("cast('\"a\":2' as JSON)", JSON, "\"\\\"a\\\":2\"");
+    }
+
+    @Test
+    public void testCastFromTimestamp()
+    {
+        assertFunction("cast(cast (null as timestamp) as JSON)", JSON, null);
+        assertFunction("CAST(from_unixtime(1) AS JSON)", JSON, "\"" + sqlTimestamp(1000).toString() + "\"");
+    }
+
+    private static SqlTimestamp sqlTimestamp(long millisUtc)
+    {
+        return new SqlTimestamp(millisUtc, TEST_SESSION.getTimeZoneKey());
     }
 }

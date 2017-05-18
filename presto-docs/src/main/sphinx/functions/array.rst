@@ -33,6 +33,10 @@ Array Functions
 
     Returns an array of the elements in the union of ``x`` and ``y``, without duplicates.
 
+.. function:: array_except(x, y) -> array
+
+    Returns an array of elements in ``x`` but not in ``y``, without duplicates.
+
 .. function:: array_join(x, delimiter, null_replacement) -> varchar
 
     Concatenates the elements of the given array using the delimiter and an optional string to replace nulls.
@@ -56,16 +60,22 @@ Array Functions
 .. function:: array_sort(x) -> array
 
     Sorts and returns the array ``x``. The elements of ``x`` must be orderable.
+    Null elements will be placed at the end of the returned array.
+
+.. function:: arrays_overlap(x, y) -> boolean
+
+    Tests if arrays ``x`` and ``y`` have any any non-null elements in common.
+    Returns null if there are no non-null elements in common but either array contains null.
 
 .. function:: cardinality(x) -> bigint
 
     Returns the cardinality (size) of the array ``x``.
 
-.. function:: concat(x, y) -> array
+.. function:: concat(array1, array2, ..., arrayN) -> array
     :noindex:
 
-    Concatenates the arrays ``x`` and ``y``. This function provides the same
-    functionality as the SQL-standard concatenation operator (``||``).
+    Concatenates the arrays ``array1``, ``array2``, ``...``, ``arrayN``.
+    This function provides the same functionality as the SQL-standard concatenation operator (``||``).
 
 .. function:: contains(x, element) -> boolean
 
@@ -77,9 +87,19 @@ Array Functions
     If ``index`` >= 0, this function provides the same functionality as the SQL-standard subscript operator (``[]``).
     If ``index`` < 0, ``element_at`` accesses elements from the last to the first.
 
+.. function:: filter(array, function) -> array
+    :noindex:
+
+    See :func:`filter`.
+
 .. function:: flatten(x) -> array
 
     Flattens an ``array(array(T))`` to an ``array(T)`` by concatenating the contained arrays.
+
+.. function:: reduce(array, initialState, inputFunction, outputFunction) -> x
+    :noindex:
+
+    See :func:`reduce`.
 
 .. function:: reverse(x) -> array
     :noindex:
@@ -100,10 +120,19 @@ Array Functions
     Generate a sequence of timestamps from ``start`` to ``stop``, incrementing by ``step``.
     The type of ``step`` can be either ``INTERVAL DAY TO SECOND`` or ``INTERVAL YEAR TO MONTH``.
 
+.. function:: shuffle(x) -> array
+
+    Generate a random permutation of the given array ``x``.
+
 .. function:: slice(x, start, length) -> array
 
     Subsets array ``x`` starting from index ``start`` (or starting from the end
     if ``start`` is negative) with a length of ``length``.
+
+.. function:: transform(array, function) -> array
+    :noindex:
+
+    See :func:`transform`.
 
 .. function:: zip(array1, array2[, ...]) -> array<row>
 
@@ -112,3 +141,8 @@ Array Functions
     If the arguments have an uneven length, missing values are filled with ``NULL``. ::
 
         SELECT zip(ARRAY[1, 2], ARRAY['1b', null, '3b']); -- [ROW(1, '1b'), ROW(2, null), ROW(null, '3b')]
+
+.. function:: zip_with(array1, array2, function) -> array
+    :noindex:
+
+    See :func:`zip_with`.

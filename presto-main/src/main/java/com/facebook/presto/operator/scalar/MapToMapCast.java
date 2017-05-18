@@ -36,7 +36,7 @@ import java.lang.invoke.MethodHandles;
 import static com.facebook.presto.spi.function.OperatorType.CAST;
 import static com.facebook.presto.spi.function.OperatorType.EQUAL;
 import static com.facebook.presto.spi.type.TypeUtils.readNativeValue;
-import static com.facebook.presto.type.TypeJsonUtils.appendToBlockBuilder;
+import static com.facebook.presto.spi.type.TypeUtils.writeNativeValue;
 
 @ScalarOperator(CAST)
 public final class MapToMapCast
@@ -85,7 +85,7 @@ public final class MapToMapCast
                 if (toKey == null) {
                     throw new PrestoException(StandardErrorCode.INVALID_CAST_ARGUMENT, "map key is null");
                 }
-                appendToBlockBuilder(toKeyType, toKey, keyBlockBuilder);
+                writeNativeValue(toKeyType, keyBlockBuilder, toKey);
             }
             catch (Throwable t) {
                 Throwables.propagateIfInstanceOf(t, Error.class);
@@ -99,10 +99,15 @@ public final class MapToMapCast
             if (!typedSet.contains(keyBlock, i / 2)) {
                 typedSet.add(keyBlock, i / 2);
                 toKeyType.appendTo(keyBlock, i / 2, blockBuilder);
+                if (fromMap.isNull(i + 1)) {
+                    blockBuilder.appendNull();
+                    continue;
+                }
+
                 Object fromValue = readNativeValue(fromValueType, fromMap, i + 1);
                 try {
                     Object toValue = valueCastFunction.invoke(fromValue);
-                    appendToBlockBuilder(toValueType, toValue, blockBuilder);
+                    writeNativeValue(toValueType, blockBuilder, toValue);
                 }
                 catch (Throwable t) {
                     Throwables.propagateIfInstanceOf(t, Error.class);

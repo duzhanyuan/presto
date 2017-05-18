@@ -14,15 +14,17 @@
 package com.facebook.presto.hive;
 
 import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.RecordCursor;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.type.TypeManager;
-import com.google.inject.Inject;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.serde2.columnar.BytesRefArrayWritable;
 import org.apache.hadoop.hive.serde2.columnar.LazyBinaryColumnarSerDe;
 import org.apache.hadoop.mapred.RecordReader;
 import org.joda.time.DateTimeZone;
+
+import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Optional;
@@ -43,7 +45,7 @@ public class ColumnarBinaryHiveRecordCursorProvider
     }
 
     @Override
-    public Optional<HiveRecordCursor> createHiveRecordCursor(
+    public Optional<RecordCursor> createRecordCursor(
             String clientId,
             Configuration configuration,
             ConnectorSession session,
@@ -52,7 +54,6 @@ public class ColumnarBinaryHiveRecordCursorProvider
             long length,
             Properties schema,
             List<HiveColumnHandle> columns,
-            List<HivePartitionKey> partitionKeys,
             TupleDomain<HiveColumnHandle> effectivePredicate,
             DateTimeZone hiveStorageTimeZone,
             TypeManager typeManager)
@@ -64,13 +65,11 @@ public class ColumnarBinaryHiveRecordCursorProvider
         RecordReader<?, ?> recordReader = hdfsEnvironment.doAs(session.getUser(),
                 () -> HiveUtil.createRecordReader(configuration, path, start, length, schema, columns));
 
-        return Optional.<HiveRecordCursor>of(new ColumnarBinaryHiveRecordCursor<>(
+        return Optional.of(new ColumnarBinaryHiveRecordCursor<>(
                 bytesRecordReader(recordReader),
                 length,
                 schema,
-                partitionKeys,
                 columns,
-                hiveStorageTimeZone,
                 typeManager));
     }
 

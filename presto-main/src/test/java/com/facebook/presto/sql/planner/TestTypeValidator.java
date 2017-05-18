@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.sql.planner;
 
+import com.facebook.presto.connector.ConnectorId;
 import com.facebook.presto.metadata.FunctionKind;
 import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.metadata.TableHandle;
@@ -22,6 +23,7 @@ import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.spi.type.VarcharType;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
+import com.facebook.presto.sql.planner.plan.Assignments;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.PlanNodeId;
 import com.facebook.presto.sql.planner.plan.ProjectNode;
@@ -59,7 +61,7 @@ import static com.facebook.presto.sql.planner.plan.AggregationNode.Step.SINGLE;
 @Test(singleThreaded = true)
 public class TestTypeValidator
 {
-    private static final TableHandle TEST_TABLE_HANDLE = new TableHandle("test", new TestingTableHandle());
+    private static final TableHandle TEST_TABLE_HANDLE = new TableHandle(new ConnectorId("test"), new TestingTableHandle());
     private static final SqlParser SQL_PARSER = new SqlParser();
     private static final TypeValidator TYPE_VALIDATOR = new TypeValidator();
 
@@ -105,7 +107,7 @@ public class TestTypeValidator
     {
         Expression expression1 = new Cast(columnB.toSymbolReference(), StandardTypes.BIGINT);
         Expression expression2 = new Cast(columnC.toSymbolReference(), StandardTypes.BIGINT);
-        Map<Symbol, Expression> assignments = ImmutableMap.<Symbol, Expression>builder()
+        Assignments assignments = Assignments.builder()
                 .put(symbolAllocator.newSymbol(expression1, BIGINT), expression1)
                 .put(symbolAllocator.newSymbol(expression2, BIGINT), expression2)
                 .build();
@@ -141,30 +143,32 @@ public class TestTypeValidator
             throws Exception
     {
         Symbol windowSymbol = symbolAllocator.newSymbol("sum", DOUBLE);
-        Map<Symbol, Signature> signatures = ImmutableMap.of(
-                windowSymbol, new Signature(
+        Signature signature = new Signature(
                         "sum",
                         FunctionKind.WINDOW,
                         ImmutableList.of(),
                         ImmutableList.of(),
                         DOUBLE.getTypeSignature(),
                         ImmutableList.of(DOUBLE.getTypeSignature()),
-                        false));
-        Map<Symbol, FunctionCall> functions = ImmutableMap.of(windowSymbol, new FunctionCall(QualifiedName.of("sum"), ImmutableList.of(columnC.toSymbolReference())));
+                        false);
+        FunctionCall functionCall = new FunctionCall(QualifiedName.of("sum"), ImmutableList.of(columnC.toSymbolReference()));
+
         WindowNode.Frame frame = new WindowNode.Frame(
                 WindowFrame.Type.RANGE,
                 FrameBound.Type.UNBOUNDED_PRECEDING,
                 Optional.empty(),
                 FrameBound.Type.UNBOUNDED_FOLLOWING,
                 Optional.empty());
-        WindowNode.Specification specification = new WindowNode.Specification(ImmutableList.of(), ImmutableList.of(), ImmutableMap.of(), frame);
+
+        WindowNode.Function function = new WindowNode.Function(functionCall, signature, frame);
+
+        WindowNode.Specification specification = new WindowNode.Specification(ImmutableList.of(), ImmutableList.of(), ImmutableMap.of());
 
         PlanNode node = new WindowNode(
                 newId(),
                 baseTableScan,
                 specification,
-                functions,
-                signatures,
+                ImmutableMap.of(windowSymbol, function),
                 Optional.empty(),
                 ImmutableSet.of(),
                 0);
@@ -191,14 +195,12 @@ public class TestTypeValidator
         PlanNode node = new AggregationNode(
                 newId(),
                 baseTableScan,
-                ImmutableList.of(columnA, columnB),
                 aggregations,
                 functions,
                 ImmutableMap.of(),
                 ImmutableList.of(ImmutableList.of(columnA, columnB)),
                 SINGLE,
                 Optional.empty(),
-                0,
                 Optional.empty());
 
         assertTypesValid(node);
@@ -209,7 +211,7 @@ public class TestTypeValidator
             throws Exception
     {
         Expression expression = new Cast(columnB.toSymbolReference(), StandardTypes.BIGINT);
-        Map<Symbol, Expression> assignments = ImmutableMap.<Symbol, Expression>builder()
+        Assignments assignments = Assignments.builder()
                 .put(symbolAllocator.newSymbol(expression, BIGINT), expression)
                 .put(symbolAllocator.newSymbol(columnE.toSymbolReference(), VARCHAR), columnE.toSymbolReference()) // implicit coercion from varchar(3) to varchar
                 .build();
@@ -224,7 +226,7 @@ public class TestTypeValidator
     {
         Expression expression1 = new Cast(columnB.toSymbolReference(), StandardTypes.INTEGER);
         Expression expression2 = new Cast(columnA.toSymbolReference(), StandardTypes.INTEGER);
-        Map<Symbol, Expression> assignments = ImmutableMap.<Symbol, Expression>builder()
+        Assignments assignments = Assignments.builder()
                 .put(symbolAllocator.newSymbol(expression1, BIGINT), expression1) // should be INTEGER
                 .put(symbolAllocator.newSymbol(expression1, INTEGER), expression2)
                 .build();
@@ -255,14 +257,12 @@ public class TestTypeValidator
         PlanNode node = new AggregationNode(
                 newId(),
                 baseTableScan,
-                ImmutableList.of(columnA, columnB),
                 aggregations,
                 functions,
                 ImmutableMap.of(),
                 ImmutableList.of(ImmutableList.of(columnA, columnB)),
                 SINGLE,
                 Optional.empty(),
-                0,
                 Optional.empty());
 
         assertTypesValid(node);
@@ -287,14 +287,12 @@ public class TestTypeValidator
         PlanNode node = new AggregationNode(
                 newId(),
                 baseTableScan,
-                ImmutableList.of(columnA, columnB),
                 aggregations,
                 functions,
                 ImmutableMap.of(),
                 ImmutableList.of(ImmutableList.of(columnA, columnB)),
                 SINGLE,
                 Optional.empty(),
-                0,
                 Optional.empty());
 
         assertTypesValid(node);
@@ -305,30 +303,32 @@ public class TestTypeValidator
             throws Exception
     {
         Symbol windowSymbol = symbolAllocator.newSymbol("sum", DOUBLE);
-        Map<Symbol, Signature> signatures = ImmutableMap.of(
-                windowSymbol, new Signature(
+        Signature signature = new Signature(
                         "sum",
                         FunctionKind.WINDOW,
                         ImmutableList.of(),
                         ImmutableList.of(),
                         DOUBLE.getTypeSignature(),
                         ImmutableList.of(DOUBLE.getTypeSignature()),
-                        false));
-        Map<Symbol, FunctionCall> functions = ImmutableMap.of(windowSymbol, new FunctionCall(QualifiedName.of("sum"), ImmutableList.of(columnA.toSymbolReference()))); // shoud be columnC
+                        false);
+        FunctionCall functionCall = new FunctionCall(QualifiedName.of("sum"), ImmutableList.of(columnA.toSymbolReference())); // should be columnC
+
         WindowNode.Frame frame = new WindowNode.Frame(
                 WindowFrame.Type.RANGE,
                 FrameBound.Type.UNBOUNDED_PRECEDING,
                 Optional.empty(),
                 FrameBound.Type.UNBOUNDED_FOLLOWING,
                 Optional.empty());
-        WindowNode.Specification specification = new WindowNode.Specification(ImmutableList.of(), ImmutableList.of(), ImmutableMap.of(), frame);
+
+        WindowNode.Function function = new WindowNode.Function(functionCall, signature, frame);
+
+        WindowNode.Specification specification = new WindowNode.Specification(ImmutableList.of(), ImmutableList.of(), ImmutableMap.of());
 
         PlanNode node = new WindowNode(
                 newId(),
                 baseTableScan,
                 specification,
-                functions,
-                signatures,
+                ImmutableMap.of(windowSymbol, function),
                 Optional.empty(),
                 ImmutableSet.of(),
                 0);
@@ -341,30 +341,32 @@ public class TestTypeValidator
             throws Exception
     {
         Symbol windowSymbol = symbolAllocator.newSymbol("sum", DOUBLE);
-        Map<Symbol, Signature> signatures = ImmutableMap.of(
-                windowSymbol, new Signature(
+        Signature signature = new Signature(
                         "sum",
                         FunctionKind.WINDOW,
                         ImmutableList.of(),
                         ImmutableList.of(),
                         BIGINT.getTypeSignature(), // should be DOUBLE
                         ImmutableList.of(DOUBLE.getTypeSignature()),
-                        false));
-        Map<Symbol, FunctionCall> functions = ImmutableMap.of(windowSymbol, new FunctionCall(QualifiedName.of("sum"), ImmutableList.of(columnC.toSymbolReference())));
+                        false);
+        FunctionCall functionCall = new FunctionCall(QualifiedName.of("sum"), ImmutableList.of(columnC.toSymbolReference()));
+
         WindowNode.Frame frame = new WindowNode.Frame(
                 WindowFrame.Type.RANGE,
                 FrameBound.Type.UNBOUNDED_PRECEDING,
                 Optional.empty(),
                 FrameBound.Type.UNBOUNDED_FOLLOWING,
                 Optional.empty());
-        WindowNode.Specification specification = new WindowNode.Specification(ImmutableList.of(), ImmutableList.of(), ImmutableMap.of(), frame);
+
+        WindowNode.Function function = new WindowNode.Function(functionCall, signature, frame);
+
+        WindowNode.Specification specification = new WindowNode.Specification(ImmutableList.of(), ImmutableList.of(), ImmutableMap.of());
 
         PlanNode node = new WindowNode(
                 newId(),
                 baseTableScan,
                 specification,
-                functions,
-                signatures,
+                ImmutableMap.of(windowSymbol, function),
                 Optional.empty(),
                 ImmutableSet.of(),
                 0);

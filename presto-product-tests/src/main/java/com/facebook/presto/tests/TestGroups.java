@@ -28,10 +28,12 @@ public final class TestGroups
     public static final String BLACKHOLE_CONNECTOR = "blackhole";
     public static final String SMOKE = "smoke";
     public static final String JDBC = "jdbc";
+    public static final String MYSQL = "mysql";
+    public static final String SIMBA_JDBC = "simba_jdbc";
     public static final String QUERY_ENGINE = "qe";
     public static final String COMPARISON = "comparison";
     public static final String LOGICAL = "logical";
-    public static final String INTERSECT = "intersect";
+    public static final String SET_OPERATION = "set_operation";
     public static final String JSON_FUNCTIONS = "json_functions";
     public static final String URL_FUNCTIONS = "url_functions";
     public static final String ARRAY_FUNCTIONS = "array_functions";
@@ -46,7 +48,15 @@ public final class TestGroups
     public static final String PROFILE_SPECIFIC_TESTS = "profile_specific_tests";
     public static final String HDFS_IMPERSONATION = "hdfs_impersonation";
     public static final String HDFS_NO_IMPERSONATION = "hdfs_no_impersonation";
+    public static final String BASIC_SQL = "basic_sql";
     public static final String AUTHORIZATION = "authorization";
+    public static final String POST_HIVE_1_0_1 = "post_hive_1_0_1";
+    public static final String HIVE_COERCION = "hive_coercion";
+    public static final String CASSANDRA = "cassandra";
+    public static final String SQL_SERVER = "sqlserver";
+    public static final String LDAP = "ldap";
+    public static final String LDAP_CLI = "ldap_cli";
+    public static final String SKIP_ON_CDH = "skip_on_cdh";
 
     private TestGroups() {}
 }

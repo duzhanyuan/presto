@@ -13,12 +13,14 @@
  */
 package com.facebook.presto.sql.planner;
 
+import com.facebook.presto.sql.planner.iterative.Lookup;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.tree.DefaultExpressionTraversalVisitor;
+import com.facebook.presto.sql.tree.DefaultTraversalVisitor;
 import com.facebook.presto.sql.tree.DereferenceExpression;
 import com.facebook.presto.sql.tree.Expression;
+import com.facebook.presto.sql.tree.Identifier;
 import com.facebook.presto.sql.tree.QualifiedName;
-import com.facebook.presto.sql.tree.QualifiedNameReference;
 import com.facebook.presto.sql.tree.SymbolReference;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -37,6 +39,14 @@ public final class DependencyExtractor
     {
         ImmutableSet.Builder<Symbol> uniqueSymbols = ImmutableSet.builder();
         extractExpressions(node).forEach(expression -> uniqueSymbols.addAll(extractUnique(expression)));
+
+        return uniqueSymbols.build();
+    }
+
+    public static Set<Symbol> extractUnique(PlanNode node, Lookup lookup)
+    {
+        ImmutableSet.Builder<Symbol> uniqueSymbols = ImmutableSet.builder();
+        extractExpressions(node, lookup).forEach(expression -> uniqueSymbols.addAll(extractUnique(expression)));
 
         return uniqueSymbols.build();
     }
@@ -82,7 +92,7 @@ public final class DependencyExtractor
     }
 
     private static class QualifiedNameBuilderVisitor
-            extends DefaultExpressionTraversalVisitor<Void, ImmutableSet.Builder<QualifiedName>>
+            extends DefaultTraversalVisitor<Void, ImmutableSet.Builder<QualifiedName>>
     {
         private final Set<Expression> columnReferences;
 
@@ -104,9 +114,9 @@ public final class DependencyExtractor
         }
 
         @Override
-        protected Void visitQualifiedNameReference(QualifiedNameReference node, ImmutableSet.Builder<QualifiedName> builder)
+        protected Void visitIdentifier(Identifier node, ImmutableSet.Builder<QualifiedName> builder)
         {
-            builder.add(node.getName());
+            builder.add(QualifiedName.of(node.getName()));
             return null;
         }
     }

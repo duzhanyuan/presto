@@ -15,11 +15,8 @@ package com.facebook.presto.sql.planner.optimizations;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.SystemSessionProperties;
-import com.facebook.presto.metadata.FunctionRegistry;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.metadata.TableLayoutResult;
-import com.facebook.presto.operator.aggregation.InternalAggregationFunction;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.Constraint;
 import com.facebook.presto.spi.GroupingProperty;
@@ -29,6 +26,7 @@ import com.facebook.presto.spi.predicate.NullableValue;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.parser.SqlParser;
+import com.facebook.presto.sql.planner.DependencyExtractor;
 import com.facebook.presto.sql.planner.DomainTranslator;
 import com.facebook.presto.sql.planner.ExpressionInterpreter;
 import com.facebook.presto.sql.planner.LookupSymbolResolver;
@@ -38,8 +36,9 @@ import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.SymbolAllocator;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
+import com.facebook.presto.sql.planner.plan.ApplyNode;
+import com.facebook.presto.sql.planner.plan.Assignments;
 import com.facebook.presto.sql.planner.plan.ChildReplacer;
-import com.facebook.presto.sql.planner.plan.DeleteNode;
 import com.facebook.presto.sql.planner.plan.DistinctLimitNode;
 import com.facebook.presto.sql.planner.plan.EnforceSingleRowNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
@@ -69,10 +68,9 @@ import com.facebook.presto.sql.planner.plan.ValuesNode;
 import com.facebook.presto.sql.planner.plan.WindowNode;
 import com.facebook.presto.sql.tree.BooleanLiteral;
 import com.facebook.presto.sql.tree.Expression;
-import com.facebook.presto.sql.tree.FunctionCall;
 import com.facebook.presto.sql.tree.NullLiteral;
-import com.facebook.presto.sql.tree.QualifiedName;
 import com.facebook.presto.sql.tree.SymbolReference;
+import com.facebook.presto.util.maps.IdentityLinkedHashMap;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
@@ -91,12 +89,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -106,29 +103,29 @@ import static com.facebook.presto.sql.ExpressionUtils.extractConjuncts;
 import static com.facebook.presto.sql.ExpressionUtils.stripDeterministicConjuncts;
 import static com.facebook.presto.sql.ExpressionUtils.stripNonDeterministicConjuncts;
 import static com.facebook.presto.sql.analyzer.ExpressionAnalyzer.getExpressionTypes;
+import static com.facebook.presto.sql.planner.FragmentTableScanCounter.countSources;
 import static com.facebook.presto.sql.planner.FragmentTableScanCounter.hasMultipleSources;
+import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
-import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_RANDOM_DISTRIBUTION;
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static com.facebook.presto.sql.planner.optimizations.ActualProperties.Global.partitionedOn;
 import static com.facebook.presto.sql.planner.optimizations.ActualProperties.Global.singleStreamPartition;
 import static com.facebook.presto.sql.planner.optimizations.LocalProperties.grouped;
-import static com.facebook.presto.sql.planner.optimizations.ScalarQueryUtil.isScalar;
-import static com.facebook.presto.sql.planner.plan.AggregationNode.Step.FINAL;
-import static com.facebook.presto.sql.planner.plan.AggregationNode.Step.PARTIAL;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.REMOTE;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.GATHER;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.REPARTITION;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.gatheringExchange;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.partitionedExchange;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.replicatedExchange;
-import static com.facebook.presto.sql.planner.plan.JoinNode.Type.FULL;
-import static com.facebook.presto.sql.planner.plan.JoinNode.Type.INNER;
-import static com.facebook.presto.sql.planner.plan.JoinNode.Type.RIGHT;
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableSet;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static java.lang.String.format;
+import static java.util.Collections.emptyList;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 
 public class AddExchanges
@@ -146,31 +143,30 @@ public class AddExchanges
     @Override
     public PlanNode optimize(PlanNode plan, Session session, Map<Symbol, Type> types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator)
     {
-        PlanWithProperties result = plan.accept(new Rewriter(symbolAllocator, idAllocator, symbolAllocator, session), new Context(PreferredProperties.any(), false));
+        Context context = new Context(PreferredProperties.any(), ImmutableList.of());
+        PlanWithProperties result = plan.accept(new Rewriter(idAllocator, symbolAllocator, session), context);
         return result.getNode();
     }
 
     private static class Context
     {
-        private PreferredProperties preferredProperties;
-        // For delete queries, the TableScan node that corresponds to the table being deleted on must be collocated with the Delete node.
-        // Care must be taken so that Exchange node is not introduced between the two. For now, only SemiJoin may introduce it.
-        private boolean downstreamIsDelete;
+        private final PreferredProperties preferredProperties;
+        private final List<Symbol> correlations;
 
-        Context(PreferredProperties preferredProperties, boolean downstreamIsDelete)
+        Context(PreferredProperties preferredProperties, List<Symbol> correlations)
         {
             this.preferredProperties = preferredProperties;
-            this.downstreamIsDelete = downstreamIsDelete;
+            this.correlations = ImmutableList.copyOf(requireNonNull(correlations, "correlations is null"));
         }
 
         Context withPreferredProperties(PreferredProperties preferredProperties)
         {
-            return new Context(preferredProperties, downstreamIsDelete);
+            return new Context(preferredProperties, correlations);
         }
 
-        Context withHashPartitionedSemiJoinBanned(boolean hashPartitionedSemiJoinBanned)
+        Context withCorrelations(List<Symbol> correlations)
         {
-            return new Context(preferredProperties, hashPartitionedSemiJoinBanned);
+            return new Context(preferredProperties, correlations);
         }
 
         PreferredProperties getPreferredProperties()
@@ -178,31 +174,29 @@ public class AddExchanges
             return preferredProperties;
         }
 
-        boolean isDownstreamIsDelete()
+        List<Symbol> getCorrelations()
         {
-            return downstreamIsDelete;
+            return correlations;
         }
     }
 
     private class Rewriter
             extends PlanVisitor<Context, PlanWithProperties>
     {
-        private final SymbolAllocator allocator;
         private final PlanNodeIdAllocator idAllocator;
         private final SymbolAllocator symbolAllocator;
+        private final Map<Symbol, Type> types;
         private final Session session;
         private final boolean distributedIndexJoins;
-        private final boolean distributedJoins;
         private final boolean preferStreamingOperators;
         private final boolean redistributeWrites;
 
-        public Rewriter(SymbolAllocator allocator, PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
+        public Rewriter(PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
         {
-            this.allocator = allocator;
             this.idAllocator = idAllocator;
             this.symbolAllocator = symbolAllocator;
+            this.types = ImmutableMap.copyOf(symbolAllocator.getTypes());
             this.session = session;
-            this.distributedJoins = SystemSessionProperties.isDistributedJoinEnabled(session);
             this.distributedIndexJoins = SystemSessionProperties.isDistributedIndexJoinEnabled(session);
             this.redistributeWrites = SystemSessionProperties.isRedistributeWrites(session);
             this.preferStreamingOperators = SystemSessionProperties.preferStreamingOperators(session);
@@ -212,13 +206,6 @@ public class AddExchanges
         protected PlanWithProperties visitPlan(PlanNode node, Context context)
         {
             return rebaseAndDeriveProperties(node, planChild(node, context));
-        }
-
-        @Override
-        public PlanWithProperties visitDelete(DeleteNode node, Context context)
-        {
-            // Delete operator does not work unless it is co-located with the corresponding TableScan.
-            return rebaseAndDeriveProperties(node, planChild(node, context.withHashPartitionedSemiJoinBanned(true)));
         }
 
         @Override
@@ -233,7 +220,7 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitOutput(OutputNode node, Context context)
         {
-            PlanWithProperties child = planChild(node, context.withPreferredProperties(PreferredProperties.any()));
+            PlanWithProperties child = planChild(node, context.withPreferredProperties(PreferredProperties.undistributed()));
 
             if (!child.getProperties().isSingleNode()) {
                 child = withDerivedProperties(
@@ -261,20 +248,15 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitAggregation(AggregationNode node, Context context)
         {
-            FunctionRegistry functionRegistry = metadata.getFunctionRegistry();
-            boolean decomposable = node.getFunctions()
-                    .values().stream()
-                    .map(functionRegistry::getAggregateFunctionImplementation)
-                    .allMatch(InternalAggregationFunction::isDecomposable);
+            Set<Symbol> partitioningRequirement = ImmutableSet.copyOf(node.getGroupingKeys());
 
-            HashSet<Symbol> partitioningRequirement = new HashSet<>(node.getGroupingSets().get(0));
-            for (int i = 1; i < node.getGroupingSets().size(); i++) {
-                partitioningRequirement.retainAll(node.getGroupingSets().get(i));
-            }
+            boolean preferSingleNode = (node.hasEmptyGroupingSet() && !node.hasNonEmptyGroupingSet()) ||
+                    (node.hasDefaultOutput() && !node.isDecomposable(metadata.getFunctionRegistry()));
 
-            PreferredProperties preferredProperties = PreferredProperties.any();
-            if (!node.getGroupBy().isEmpty()) {
-                preferredProperties = PreferredProperties.partitionedWithLocal(partitioningRequirement, grouped(node.getGroupBy()))
+            PreferredProperties preferredProperties = preferSingleNode ? PreferredProperties.undistributed() : PreferredProperties.any();
+
+            if (!node.getGroupingKeys().isEmpty()) {
+                preferredProperties = PreferredProperties.partitionedWithLocal(partitioningRequirement, grouped(node.getGroupingKeys()))
                         .mergeWithParent(context.getPreferredProperties());
             }
 
@@ -285,103 +267,25 @@ public class AddExchanges
                 return rebaseAndDeriveProperties(node, child);
             }
 
-            if (node.getGroupBy().isEmpty()) {
-                if (decomposable) {
-                    return splitAggregation(node, child, partial -> gatheringExchange(idAllocator.getNextId(), REMOTE, partial));
-                }
-                else {
-                    child = withDerivedProperties(
-                            gatheringExchange(idAllocator.getNextId(), REMOTE, child.getNode()),
-                            child.getProperties());
-
-                    return rebaseAndDeriveProperties(node, child);
-                }
+            if (preferSingleNode) {
+                // For queries with only empty grouping sets like
+                //
+                // SELECT count(*) FROM lineitem;
+                //
+                // there is no need for distributed aggregation. Single node FINAL aggregation will suffice,
+                // since all input have to be aggregated into one line output.
+                //
+                // If aggregation must produce default output and it is not decomposable, we can not distribute it
+                child = withDerivedProperties(
+                        gatheringExchange(idAllocator.getNextId(), REMOTE, child.getNode()),
+                        child.getProperties());
             }
-            else {
-                if (child.getProperties().isStreamPartitionedOn(partitioningRequirement)) {
-                    return rebaseAndDeriveProperties(node, child);
-                }
-                else {
-                    if (decomposable) {
-                        Function<PlanNode, PlanNode> exchanger = null;
-                        if (!child.getProperties().isNodePartitionedOn(partitioningRequirement)) {
-                            exchanger = partial -> partitionedExchange(
-                                    idAllocator.getNextId(),
-                                    REMOTE,
-                                    partial,
-                                    node.getGroupBy(),
-                                    node.getHashSymbol());
-                        }
-                        return splitAggregation(node, child, exchanger);
-                    }
-                    else {
-                        child = withDerivedProperties(
-                                partitionedExchange(idAllocator.getNextId(), REMOTE, child.getNode(), node.getGroupBy(), node.getHashSymbol()),
-                                child.getProperties());
-                        return rebaseAndDeriveProperties(node, child);
-                    }
-                }
+            else if (!child.getProperties().isStreamPartitionedOn(partitioningRequirement) && !child.getProperties().isNodePartitionedOn(partitioningRequirement)) {
+                child = withDerivedProperties(
+                        partitionedExchange(idAllocator.getNextId(), REMOTE, child.getNode(), node.getGroupingKeys(), node.getHashSymbol()),
+                        child.getProperties());
             }
-        }
-
-        private PlanWithProperties splitAggregation(AggregationNode node, PlanWithProperties newChild, Function<PlanNode, PlanNode> exchanger)
-        {
-            // otherwise, add a partial and final with an exchange in between
-            Map<Symbol, Symbol> masks = node.getMasks();
-
-            Map<Symbol, FunctionCall> finalCalls = new HashMap<>();
-            Map<Symbol, FunctionCall> intermediateCalls = new HashMap<>();
-            Map<Symbol, Signature> intermediateFunctions = new HashMap<>();
-            Map<Symbol, Symbol> intermediateMask = new HashMap<>();
-            for (Map.Entry<Symbol, FunctionCall> entry : node.getAggregations().entrySet()) {
-                Signature signature = node.getFunctions().get(entry.getKey());
-                InternalAggregationFunction function = metadata.getFunctionRegistry().getAggregateFunctionImplementation(signature);
-
-                Symbol intermediateSymbol = allocator.newSymbol(signature.getName(), function.getIntermediateType());
-                intermediateCalls.put(intermediateSymbol, entry.getValue());
-                intermediateFunctions.put(intermediateSymbol, signature);
-                if (masks.containsKey(entry.getKey())) {
-                    intermediateMask.put(intermediateSymbol, masks.get(entry.getKey()));
-                }
-
-                // rewrite final aggregation in terms of intermediate function
-                finalCalls.put(entry.getKey(), new FunctionCall(QualifiedName.of(signature.getName()), ImmutableList.of(intermediateSymbol.toSymbolReference())));
-            }
-
-            PlanWithProperties partial = withDerivedProperties(
-                    new AggregationNode(
-                            idAllocator.getNextId(),
-                            newChild.getNode(),
-                            node.getGroupBy(),
-                            intermediateCalls,
-                            intermediateFunctions,
-                            intermediateMask,
-                            node.getGroupingSets(),
-                            PARTIAL,
-                            node.getSampleWeight(),
-                            node.getConfidence(),
-                            node.getHashSymbol()),
-                    newChild.getProperties());
-
-            PlanNode source = partial.getNode();
-            if (exchanger != null) {
-                source = exchanger.apply(source);
-            }
-
-            return withDerivedProperties(
-                    new AggregationNode(
-                            node.getId(),
-                            source,
-                            node.getGroupBy(),
-                            finalCalls,
-                            node.getFunctions(),
-                            ImmutableMap.of(),
-                            node.getGroupingSets(),
-                            FINAL,
-                            Optional.empty(),
-                            node.getConfidence(),
-                            node.getHashSymbol()),
-                    deriveProperties(source, partial.getProperties()));
+            return rebaseAndDeriveProperties(node, child);
         }
 
         @Override
@@ -394,15 +298,13 @@ public class AddExchanges
 
         private Function<Symbol, Optional<Symbol>> translateGroupIdSymbols(GroupIdNode node)
         {
-            Map<Symbol, Symbol> invertedMappings = ImmutableBiMap.copyOf(node.getIdentityMappings()).inverse();
-            List<Symbol> commonGroupingColumns = node.getCommonGroupingColumns();
             return symbol -> {
-                if (invertedMappings.containsKey(symbol)) {
-                    return Optional.of(invertedMappings.get(symbol));
+                if (node.getArgumentMappings().containsKey(symbol)) {
+                    return Optional.of(node.getArgumentMappings().get(symbol));
                 }
 
-                if (commonGroupingColumns.contains(symbol)) {
-                    return Optional.of(symbol);
+                if (node.getCommonGroupingColumns().contains(symbol)) {
+                    return Optional.of(node.getGroupingSetMappings().get(symbol));
                 }
 
                 return Optional.empty();
@@ -523,9 +425,7 @@ public class AddExchanges
                         new TopNRowNumberNode(
                                 idAllocator.getNextId(),
                                 child.getNode(),
-                                node.getPartitionBy(),
-                                node.getOrderBy(),
-                                node.getOrderings(),
+                                node.getSpecification(),
                                 node.getRowNumberSymbol(),
                                 node.getMaxRowCountPerPartition(),
                                 true,
@@ -541,18 +441,23 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitTopN(TopNNode node, Context context)
         {
-            PlanWithProperties child = planChild(node, context.withPreferredProperties(PreferredProperties.any()));
-
-            if (!child.getProperties().isSingleNode()) {
-                child = withDerivedProperties(
-                        new TopNNode(idAllocator.getNextId(), child.getNode(), node.getCount(), node.getOrderBy(), node.getOrderings(), true),
-                        child.getProperties());
-
-                child = withDerivedProperties(
-                        gatheringExchange(idAllocator.getNextId(), REMOTE, child.getNode()),
-                        child.getProperties());
+            PlanWithProperties child;
+            switch (node.getStep()) {
+                case SINGLE:
+                case FINAL:
+                    child = planChild(node, context.withPreferredProperties(PreferredProperties.undistributed()));
+                    if (!child.getProperties().isSingleNode()) {
+                        child = withDerivedProperties(
+                                gatheringExchange(idAllocator.getNextId(), REMOTE, child.getNode()),
+                                child.getProperties());
+                    }
+                    break;
+                case PARTIAL:
+                    child = planChild(node, context.withPreferredProperties(PreferredProperties.any()));
+                    break;
+                default:
+                    throw new UnsupportedOperationException(format("Unsupported step for TopN [%s]", node.getStep()));
             }
-
             return rebaseAndDeriveProperties(node, child);
         }
 
@@ -565,6 +470,20 @@ public class AddExchanges
                 child = withDerivedProperties(
                         gatheringExchange(idAllocator.getNextId(), REMOTE, child.getNode()),
                         child.getProperties());
+            }
+            else {
+                // current plan so far is single node, so local properties are effectively global properties
+                // skip the SortNode if the local properties guarantee ordering on Sort keys
+                // TODO: This should be extracted as a separate optimizer once the planner is able to reason about the ordering of each operator
+                List<LocalProperty<Symbol>> desiredProperties = new ArrayList<>();
+                for (Symbol symbol : node.getOrderBy()) {
+                    desiredProperties.add(new SortingProperty<>(symbol, node.getOrderings().get(symbol)));
+                }
+
+                if (LocalProperties.match(child.getProperties().getLocalProperties(), desiredProperties).stream()
+                        .noneMatch(Optional::isPresent)) {
+                    return child;
+                }
             }
 
             return rebaseAndDeriveProperties(node, child);
@@ -628,7 +547,7 @@ public class AddExchanges
 
             Optional<PartitioningScheme> partitioningScheme = node.getPartitioningScheme();
             if (!partitioningScheme.isPresent() && redistributeWrites) {
-                partitioningScheme = Optional.of(new PartitioningScheme(Partitioning.create(FIXED_RANDOM_DISTRIBUTION, ImmutableList.of()), source.getNode().getOutputSymbols()));
+                partitioningScheme = Optional.of(new PartitioningScheme(Partitioning.create(FIXED_ARBITRARY_DISTRIBUTION, ImmutableList.of()), source.getNode().getOutputSymbols()));
             }
 
             if (partitioningScheme.isPresent()) {
@@ -653,7 +572,7 @@ public class AddExchanges
                     metadata,
                     session,
                     deterministicPredicate,
-                    symbolAllocator.getTypes());
+                    types);
 
             TupleDomain<ColumnHandle> simplifiedConstraint = decomposedPredicate.getTupleDomain()
                     .transform(node.getAssignments()::get)
@@ -668,7 +587,7 @@ public class AddExchanges
             // Layouts will be returned in order of the connector's preference
             List<TableLayoutResult> layouts = metadata.getLayouts(
                     session, node.getTable(),
-                    new Constraint<>(simplifiedConstraint, bindings -> !shouldPrune(constraint, node.getAssignments(), bindings)),
+                    new Constraint<>(simplifiedConstraint, bindings -> !shouldPrune(constraint, node.getAssignments(), bindings, context.getCorrelations())),
                     Optional.of(node.getOutputSymbols().stream()
                             .map(node.getAssignments()::get)
                             .collect(toImmutableSet())));
@@ -739,15 +658,25 @@ public class AddExchanges
             return possiblePlans.get(0);
         }
 
-        private boolean shouldPrune(Expression predicate, Map<Symbol, ColumnHandle> assignments, Map<ColumnHandle, NullableValue> bindings)
+        private boolean shouldPrune(Expression predicate, Map<Symbol, ColumnHandle> assignments, Map<ColumnHandle, NullableValue> bindings, List<Symbol> correlations)
         {
             List<Expression> conjuncts = extractConjuncts(predicate);
-            IdentityHashMap<Expression, Type> expressionTypes = getExpressionTypes(session, metadata, parser, symbolAllocator.getTypes(), predicate);
+            IdentityLinkedHashMap<Expression, Type> expressionTypes = getExpressionTypes(
+                    session,
+                    metadata,
+                    parser,
+                    types,
+                    predicate,
+                    emptyList() /* parameters already replaced */);
 
             LookupSymbolResolver inputs = new LookupSymbolResolver(assignments, bindings);
 
             // If any conjuncts evaluate to FALSE or null, then the whole predicate will never be true and so the partition should be pruned
             for (Expression expression : conjuncts) {
+                if (DependencyExtractor.extractUnique(expression).stream().anyMatch(correlations::contains)) {
+                    // expression contains correlated symbol with outer query
+                    continue;
+                }
                 ExpressionInterpreter optimizer = ExpressionInterpreter.expressionOptimizer(expression, metadata, session, expressionTypes);
                 Object optimized = optimizer.optimize(inputs);
                 if (Boolean.FALSE.equals(optimized) || optimized == null || optimized instanceof NullLiteral) {
@@ -834,16 +763,14 @@ public class AddExchanges
             PlanWithProperties left;
             PlanWithProperties right;
 
-            boolean isCrossJoin = type == INNER && leftSymbols.isEmpty();
-            if ((distributedJoins && !isCrossJoin && !isScalar(node.getRight())) || (type == FULL) || (type == RIGHT)) {
-                // The implementation of full outer join only works if the data is hash partitioned. See LookupJoinOperators#buildSideOuterJoinUnvisitedPositions
-
+            JoinNode.DistributionType distributionType = node.getDistributionType().orElseThrow(() -> new IllegalArgumentException("distributionType not yet set"));
+            if (distributionType == JoinNode.DistributionType.PARTITIONED) {
                 SetMultimap<Symbol, Symbol> rightToLeft = createMapping(rightSymbols, leftSymbols);
                 SetMultimap<Symbol, Symbol> leftToRight = createMapping(leftSymbols, rightSymbols);
 
                 left = node.getLeft().accept(this, context.withPreferredProperties(PreferredProperties.partitioned(ImmutableSet.copyOf(leftSymbols))));
 
-                if (left.getProperties().isNodePartitionedOn(leftSymbols) && !(left.getProperties().isSingleNode() && distributedJoins)) {
+                if (left.getProperties().isNodePartitionedOn(leftSymbols) && !left.getProperties().isSingleNode()) {
                     Partitioning rightPartitioning = left.getProperties().translate(createTranslator(leftToRight)).getNodePartitioning().get();
                     right = node.getRight().accept(this, context.withPreferredProperties(PreferredProperties.partitioned(rightPartitioning)));
                     if (!right.getProperties().isNodePartitionedWith(left.getProperties(), rightToLeft::get)) {
@@ -855,7 +782,7 @@ public class AddExchanges
                 else {
                     right = node.getRight().accept(this, context.withPreferredProperties(PreferredProperties.partitioned(ImmutableSet.copyOf(rightSymbols))));
 
-                    if (right.getProperties().isNodePartitionedOn(rightSymbols) && !(right.getProperties().isSingleNode() && distributedJoins)) {
+                    if (right.getProperties().isNodePartitionedOn(rightSymbols) && !right.getProperties().isSingleNode()) {
                         Partitioning leftPartitioning = right.getProperties().translate(createTranslator(rightToLeft)).getNodePartitioning().get();
                         left = withDerivedProperties(
                                 partitionedExchange(idAllocator.getNextId(), REMOTE, left.getNode(), new PartitioningScheme(leftPartitioning, left.getNode().getOutputSymbols())),
@@ -883,7 +810,6 @@ public class AddExchanges
             }
             else {
                 // Broadcast Join
-
                 left = node.getLeft().accept(this, context.withPreferredProperties(PreferredProperties.any()));
                 right = node.getRight().accept(this, context.withPreferredProperties(PreferredProperties.any()));
 
@@ -907,9 +833,11 @@ public class AddExchanges
                     left.getNode(),
                     right.getNode(),
                     node.getCriteria(),
+                    node.getOutputSymbols(),
                     node.getFilter(),
                     node.getLeftHashSymbol(),
-                    node.getRightHashSymbol());
+                    node.getRightHashSymbol(),
+                    node.getDistributionType());
 
             return new PlanWithProperties(result, deriveProperties(result, ImmutableList.of(left.getProperties(), right.getProperties())));
         }
@@ -928,7 +856,8 @@ public class AddExchanges
             PlanWithProperties source;
             PlanWithProperties filteringSource;
 
-            if (distributedJoins && !context.isDownstreamIsDelete()) {
+            SemiJoinNode.DistributionType distributionType = node.getDistributionType().orElseThrow(() -> new IllegalArgumentException("distributionType not yet set"));
+            if (distributionType == SemiJoinNode.DistributionType.PARTITIONED) {
                 List<Symbol> sourceSymbols = ImmutableList.of(node.getSourceJoinSymbol());
                 List<Symbol> filteringSourceSymbols = ImmutableList.of(node.getFilteringSourceJoinSymbol());
 
@@ -937,9 +866,9 @@ public class AddExchanges
 
                 source = node.getSource().accept(this, context.withPreferredProperties(PreferredProperties.partitioned(ImmutableSet.copyOf(sourceSymbols))));
 
-                if (source.getProperties().isNodePartitionedOn(sourceSymbols) && !(source.getProperties().isSingleNode() && distributedJoins)) {
+                if (source.getProperties().isNodePartitionedOn(sourceSymbols) && !source.getProperties().isSingleNode()) {
                     Partitioning filteringPartitioning = source.getProperties().translate(createTranslator(sourceToFiltering)).getNodePartitioning().get();
-                    filteringSource = node.getFilteringSource().accept(this, context.withPreferredProperties(PreferredProperties.partitionedWithNullsReplicated(filteringPartitioning)));
+                    filteringSource = node.getFilteringSource().accept(this, context.withPreferredProperties(PreferredProperties.partitionedWithNullsAndAnyReplicated(filteringPartitioning)));
                     if (!source.getProperties().withReplicatedNulls(true).isNodePartitionedWith(filteringSource.getProperties(), sourceToFiltering::get)) {
                         filteringSource = withDerivedProperties(
                                 partitionedExchange(idAllocator.getNextId(), REMOTE, filteringSource.getNode(), new PartitioningScheme(
@@ -952,9 +881,9 @@ public class AddExchanges
                     }
                 }
                 else {
-                    filteringSource = node.getFilteringSource().accept(this, context.withPreferredProperties(PreferredProperties.partitionedWithNullsReplicated(ImmutableSet.copyOf(filteringSourceSymbols))));
+                    filteringSource = node.getFilteringSource().accept(this, context.withPreferredProperties(PreferredProperties.partitionedWithNullsAndAnyReplicated(ImmutableSet.copyOf(filteringSourceSymbols))));
 
-                    if (filteringSource.getProperties().isNodePartitionedOn(filteringSourceSymbols, true) && !(filteringSource.getProperties().isSingleNode() && distributedJoins)) {
+                    if (filteringSource.getProperties().isNodePartitionedOn(filteringSourceSymbols, true) && !filteringSource.getProperties().isSingleNode()) {
                         Partitioning sourcePartitioning = filteringSource.getProperties().translate(createTranslator(filteringToSource)).getNodePartitioning().get();
                         source = withDerivedProperties(
                                 partitionedExchange(idAllocator.getNextId(), REMOTE, source.getNode(), new PartitioningScheme(sourcePartitioning, source.getNode().getOutputSymbols())),
@@ -989,7 +918,7 @@ public class AddExchanges
                 source = node.getSource().accept(this, context.withPreferredProperties(PreferredProperties.any()));
                 // Delete operator works fine even if TableScans on the filtering (right) side is not co-located with itself. It only cares about the corresponding TableScan,
                 // which is always on the source (left) side. Therefore, hash-partitioned semi-join is always allowed on the filtering side.
-                filteringSource = node.getFilteringSource().accept(this, context.withPreferredProperties(PreferredProperties.any()).withHashPartitionedSemiJoinBanned(false));
+                filteringSource = node.getFilteringSource().accept(this, context.withPreferredProperties(PreferredProperties.any()));
 
                 // make filtering source match requirements of source
                 if (source.getProperties().isSingleNode()) {
@@ -1095,14 +1024,14 @@ public class AddExchanges
             }
 
             // Try planning the children to see if any of them naturally produce a partitioning (for now, just select the first)
-            boolean nullsReplicated = parentPreference.isNullsReplicated();
+            boolean nullsAndAnyReplicated = parentPreference.isNullsAndAnyReplicated();
             for (int sourceIndex = 0; sourceIndex < node.getSources().size(); sourceIndex++) {
                 PreferredProperties.PartitioningProperties childPartitioning = parentPreference.translate(outputToInputTranslator(node, sourceIndex)).get();
                 PreferredProperties childPreferred = PreferredProperties.builder()
-                        .global(PreferredProperties.Global.distributed(childPartitioning.withNullsReplicated(nullsReplicated)))
+                        .global(PreferredProperties.Global.distributed(childPartitioning.withNullsAndAnyReplicated(nullsAndAnyReplicated)))
                         .build();
                 PlanWithProperties child = node.getSources().get(sourceIndex).accept(this, context.withPreferredProperties(childPreferred));
-                if (child.getProperties().isNodePartitionedOn(childPartitioning.getPartitioningColumns(), nullsReplicated)) {
+                if (child.getProperties().isNodePartitionedOn(childPartitioning.getPartitioningColumns(), nullsAndAnyReplicated)) {
                     Function<Symbol, Optional<Symbol>> childToParent = createTranslator(createMapping(node.sourceOutputLayout(sourceIndex), node.getOutputSymbols()));
                     return child.getProperties().translate(childToParent).getNodePartitioning().get();
                 }
@@ -1119,7 +1048,7 @@ public class AddExchanges
             Optional<PreferredProperties.Global> parentGlobal = parentPreference.getGlobalProperties();
             if (parentGlobal.isPresent() && parentGlobal.get().isDistributed() && parentGlobal.get().getPartitioningProperties().isPresent()) {
                 PreferredProperties.PartitioningProperties parentPartitioningPreference = parentGlobal.get().getPartitioningProperties().get();
-                boolean nullsReplicated = parentPartitioningPreference.isNullsReplicated();
+                boolean nullsAndAnyReplicated = parentPartitioningPreference.isNullsAndAnyReplicated();
                 Partitioning desiredParentPartitioning = selectUnionPartitioning(node, context, parentPartitioningPreference);
 
                 ImmutableList.Builder<PlanNode> partitionedSources = ImmutableList.builder();
@@ -1130,11 +1059,11 @@ public class AddExchanges
 
                     PreferredProperties childPreferred = PreferredProperties.builder()
                             .global(PreferredProperties.Global.distributed(PreferredProperties.PartitioningProperties.partitioned(childPartitioning)
-                                    .withNullsReplicated(nullsReplicated)))
+                                    .withNullsAndAnyReplicated(nullsAndAnyReplicated)))
                             .build();
 
                     PlanWithProperties source = node.getSources().get(sourceIndex).accept(this, context.withPreferredProperties(childPreferred));
-                    if (!source.getProperties().isNodePartitionedOn(childPartitioning, nullsReplicated)) {
+                    if (!source.getProperties().isNodePartitionedOn(childPartitioning, nullsAndAnyReplicated)) {
                         source = withDerivedProperties(
                                 partitionedExchange(
                                         idAllocator.getNextId(),
@@ -1144,7 +1073,7 @@ public class AddExchanges
                                                 childPartitioning,
                                                 source.getNode().getOutputSymbols(),
                                                 Optional.empty(),
-                                                nullsReplicated,
+                                                nullsAndAnyReplicated,
                                                 Optional.empty())),
                                 source.getProperties());
                     }
@@ -1165,7 +1094,7 @@ public class AddExchanges
                         ActualProperties.builder()
                                 .global(partitionedOn(desiredParentPartitioning, Optional.of(desiredParentPartitioning)))
                                 .build()
-                                .withReplicatedNulls(parentPartitioningPreference.isNullsReplicated()));
+                                .withReplicatedNulls(parentPartitioningPreference.isNullsAndAnyReplicated()));
             }
 
             // first, classify children into partitioned and unpartitioned
@@ -1175,9 +1104,11 @@ public class AddExchanges
             List<PlanNode> partitionedChildren = new ArrayList<>();
             List<List<Symbol>> partitionedOutputLayouts = new ArrayList<>();
 
-            List<PlanNode> sources = node.getSources();
-            for (int i = 0; i < sources.size(); i++) {
-                PlanWithProperties child = sources.get(i).accept(this, context.withPreferredProperties(PreferredProperties.any()));
+            List<PlanWithProperties> plannedChildren = new ArrayList<>();
+
+            for (int i = 0; i < node.getSources().size(); i++) {
+                PlanWithProperties child = node.getSources().get(i).accept(this, context.withPreferredProperties(PreferredProperties.any()));
+                plannedChildren.add(child);
                 if (child.getProperties().isSingleNode()) {
                     unpartitionedChildren.add(child.getNode());
                     unpartitionedOutputLayouts.add(node.sourceOutputLayout(i));
@@ -1189,11 +1120,16 @@ public class AddExchanges
                 }
             }
 
-            PlanNode result = null;
-            if (!partitionedChildren.isEmpty()) {
-                // add an exchange above partitioned inputs and fold it into the
-                // set of unpartitioned inputs
-                // NOTE: this must provide the explicit imput mapping as unions may drop or duplicate symbols
+            PlanNode result;
+            if (!partitionedChildren.isEmpty() && unpartitionedChildren.isEmpty()) {
+                // parent does not have preference or prefers some partitioning without any explicit partitioning - just use
+                // children partitioning and don't GATHER partitioned inputs
+                // TODO: add FIXED_ARBITRARY_DISTRIBUTION support on non empty unpartitionedChildren
+                if (!parentGlobal.isPresent() || parentGlobal.get().isDistributed()) {
+                    return arbitraryDistributeUnion(node, plannedChildren, partitionedChildren, partitionedOutputLayouts);
+                }
+
+                // add a gathering exchange above partitioned inputs
                 result = new ExchangeNode(
                         idAllocator.getNextId(),
                         GATHER,
@@ -1201,14 +1137,28 @@ public class AddExchanges
                         new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), node.getOutputSymbols()),
                         partitionedChildren,
                         partitionedOutputLayouts);
-
-                unpartitionedChildren.add(result);
-                unpartitionedOutputLayouts.add(result.getOutputSymbols());
             }
+            else if (!unpartitionedChildren.isEmpty()) {
+                if (!partitionedChildren.isEmpty()) {
+                    // add a gathering exchange above partitioned inputs and fold it into the set of unpartitioned inputs
+                    // NOTE: new symbols for ExchangeNode output are required in order to keep plan logically correct with new local union below
 
-            // if there's at least one unpartitioned input (including the exchange that might have been added in the
-            // previous step), add a local union
-            if (unpartitionedChildren.size() > 1) {
+                    List<Symbol> exchangeOutputLayout = node.getOutputSymbols().stream()
+                            .map(outputSymbol -> symbolAllocator.newSymbol(outputSymbol.getName(), types.get(outputSymbol)))
+                            .collect(toImmutableList());
+
+                    result = new ExchangeNode(
+                            idAllocator.getNextId(),
+                            GATHER,
+                            REMOTE,
+                            new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), exchangeOutputLayout),
+                            partitionedChildren,
+                            partitionedOutputLayouts);
+
+                    unpartitionedChildren.add(result);
+                    unpartitionedOutputLayouts.add(result.getOutputSymbols());
+                }
+
                 ImmutableListMultimap.Builder<Symbol, Symbol> mappings = ImmutableListMultimap.builder();
                 for (int i = 0; i < node.getOutputSymbols().size(); i++) {
                     for (List<Symbol> outputLayout : unpartitionedOutputLayouts) {
@@ -1216,7 +1166,11 @@ public class AddExchanges
                     }
                 }
 
+                // add local union for all unpartitioned inputs
                 result = new UnionNode(node.getId(), unpartitionedChildren, mappings.build(), ImmutableList.copyOf(mappings.build().keySet()));
+            }
+            else {
+                throw new IllegalStateException("both unpartitionedChildren partitionedChildren are empty");
             }
 
             return new PlanWithProperties(
@@ -1224,6 +1178,51 @@ public class AddExchanges
                     ActualProperties.builder()
                             .global(singleStreamPartition())
                             .build());
+        }
+
+        private PlanWithProperties arbitraryDistributeUnion(
+                UnionNode node,
+                List<PlanWithProperties> plannedChildren,
+                List<PlanNode> partitionedChildren,
+                List<List<Symbol>> partitionedOutputLayouts)
+        {
+            // TODO: can we insert LOCAL exchange for one child SOURCE distributed and another HASH distributed?
+            if (countSources(partitionedChildren) == 0) {
+                // No source distributed child, we can use insert LOCAL exchange
+                // TODO: if all children have the same partitioning, pass this partitioning to the parent
+                // instead of "arbitraryPartition".
+                return new PlanWithProperties(node.replaceChildren(
+                        plannedChildren.stream()
+                                .map(PlanWithProperties::getNode)
+                                .collect(toList())));
+            }
+            else {
+                // Presto currently can not execute stage that has multiple table scans, so in that case
+                // we have to insert REMOTE exchange with FIXED_ARBITRARY_DISTRIBUTION instead of local exchange
+                return new PlanWithProperties(
+                        new ExchangeNode(
+                                idAllocator.getNextId(),
+                                REPARTITION,
+                                REMOTE,
+                                new PartitioningScheme(Partitioning.create(FIXED_ARBITRARY_DISTRIBUTION, ImmutableList.of()), node.getOutputSymbols()),
+                                partitionedChildren,
+                                partitionedOutputLayouts));
+            }
+        }
+
+        @Override
+        public PlanWithProperties visitApply(ApplyNode node, Context context)
+        {
+            PlanWithProperties input = node.getInput().accept(this, context);
+            PlanWithProperties subquery = node.getSubquery().accept(this, context.withCorrelations(node.getCorrelation()));
+
+            ApplyNode rewritten = new ApplyNode(
+                    node.getId(),
+                    input.getNode(),
+                    subquery.getNode(),
+                    node.getSubqueryAssignments(),
+                    node.getCorrelation());
+            return new PlanWithProperties(rewritten, deriveProperties(rewritten, ImmutableList.of(input.getProperties(), subquery.getProperties())));
         }
 
         private PlanWithProperties planChild(PlanNode node, Context context)
@@ -1240,7 +1239,10 @@ public class AddExchanges
 
         private PlanWithProperties rebaseAndDeriveProperties(PlanNode node, List<PlanWithProperties> children)
         {
-            PlanNode result = ChildReplacer.replaceChildren(node, children.stream().map(PlanWithProperties::getNode).collect(toList()));
+            PlanNode result = node.replaceChildren(
+                    children.stream()
+                            .map(PlanWithProperties::getNode)
+                            .collect(toList()));
             return new PlanWithProperties(result, deriveProperties(result, children.stream().map(PlanWithProperties::getProperties).collect(toList())));
         }
 
@@ -1251,19 +1253,19 @@ public class AddExchanges
 
         private ActualProperties deriveProperties(PlanNode result, ActualProperties inputProperties)
         {
-            return PropertyDerivations.deriveProperties(result, inputProperties, metadata, session, symbolAllocator.getTypes(), parser);
+            return PropertyDerivations.deriveProperties(result, inputProperties, metadata, session, types, parser);
         }
 
         private ActualProperties deriveProperties(PlanNode result, List<ActualProperties> inputProperties)
         {
-            return PropertyDerivations.deriveProperties(result, inputProperties, metadata, session, symbolAllocator.getTypes(), parser);
+            return PropertyDerivations.deriveProperties(result, inputProperties, metadata, session, types, parser);
         }
     }
 
-    private static Map<Symbol, Symbol> computeIdentityTranslations(Map<Symbol, Expression> assignments)
+    private static Map<Symbol, Symbol> computeIdentityTranslations(Assignments assignments)
     {
         Map<Symbol, Symbol> outputToInput = new HashMap<>();
-        for (Map.Entry<Symbol, Expression> assignment : assignments.entrySet()) {
+        for (Map.Entry<Symbol, Expression> assignment : assignments.getMap().entrySet()) {
             if (assignment.getValue() instanceof SymbolReference) {
                 outputToInput.put(assignment.getKey(), Symbol.from(assignment.getValue()));
             }
@@ -1351,6 +1353,11 @@ public class AddExchanges
     {
         private final PlanNode node;
         private final ActualProperties properties;
+
+        public PlanWithProperties(PlanNode node)
+        {
+            this(node, ActualProperties.builder().build());
+        }
 
         public PlanWithProperties(PlanNode node, ActualProperties properties)
         {

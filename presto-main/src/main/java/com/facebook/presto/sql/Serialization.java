@@ -26,8 +26,9 @@ import com.fasterxml.jackson.databind.SerializerProvider;
 import javax.inject.Inject;
 
 import java.io.IOException;
+import java.util.Optional;
 
-import static com.facebook.presto.sql.ExpressionUtils.rewriteQualifiedNamesToSymbolReferences;
+import static com.facebook.presto.sql.ExpressionUtils.rewriteIdentifiersToSymbolReferences;
 
 public final class Serialization
 {
@@ -40,7 +41,7 @@ public final class Serialization
         public void serialize(Expression expression, JsonGenerator jsonGenerator, SerializerProvider serializerProvider)
                 throws IOException
         {
-            jsonGenerator.writeString(ExpressionFormatter.formatExpression(expression, false));
+            jsonGenerator.writeString(ExpressionFormatter.formatExpression(expression, Optional.empty()));
         }
     }
 
@@ -59,7 +60,7 @@ public final class Serialization
         public Expression deserialize(JsonParser jsonParser, DeserializationContext deserializationContext)
                 throws IOException
         {
-            return rewriteQualifiedNamesToSymbolReferences(sqlParser.createExpression(jsonParser.readValueAs(String.class)));
+            return rewriteIdentifiersToSymbolReferences(sqlParser.createExpression(jsonParser.readValueAs(String.class)));
         }
     }
 
@@ -78,7 +79,7 @@ public final class Serialization
         public FunctionCall deserialize(JsonParser jsonParser, DeserializationContext deserializationContext)
                 throws IOException
         {
-            return (FunctionCall) rewriteQualifiedNamesToSymbolReferences(sqlParser.createExpression(jsonParser.readValueAs(String.class)));
+            return (FunctionCall) rewriteIdentifiersToSymbolReferences(sqlParser.createExpression(jsonParser.readValueAs(String.class)));
         }
     }
 }

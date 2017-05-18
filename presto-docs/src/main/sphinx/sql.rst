@@ -7,14 +7,17 @@ This chapter describes the SQL syntax used in Presto.
 .. toctree::
     :maxdepth: 1
 
+    sql/alter-schema
     sql/alter-table
     sql/call
     sql/commit
+    sql/create-schema
     sql/create-table
     sql/create-table-as
     sql/create-view
     sql/delete
     sql/describe
+    sql/drop-schema
     sql/drop-table
     sql/drop-view
     sql/explain
@@ -31,6 +34,7 @@ This chapter describes the SQL syntax used in Presto.
     sql/show-create-table
     sql/show-create-view
     sql/show-functions
+    sql/show-grants
     sql/show-partitions
     sql/show-schemas
     sql/show-session

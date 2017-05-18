@@ -23,17 +23,24 @@ public class ThriftHiveMetastoreStats
     private final HiveMetastoreApiStats getAllTables = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats getAllViews = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats getTable = new HiveMetastoreApiStats();
+    private final HiveMetastoreApiStats getTableColumnStatistics = new HiveMetastoreApiStats();
+    private final HiveMetastoreApiStats getPartitionColumnStatistics = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats getPartitionNames = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats getPartitionNamesPs = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats getPartition = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats getPartitionsByNames = new HiveMetastoreApiStats();
+    private final HiveMetastoreApiStats createDatabase = new HiveMetastoreApiStats();
+    private final HiveMetastoreApiStats dropDatabase = new HiveMetastoreApiStats();
+    private final HiveMetastoreApiStats alterDatabase = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats createTable = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats dropTable = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats alterTable = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats addPartitions = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats dropPartition = new HiveMetastoreApiStats();
+    private final HiveMetastoreApiStats alterPartition = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats loadRoles = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats getPrivilegeSet = new HiveMetastoreApiStats();
+    private final HiveMetastoreApiStats listPrivileges = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats grantTablePrivileges = new HiveMetastoreApiStats();
     private final HiveMetastoreApiStats revokeTablePrivileges = new HiveMetastoreApiStats();
 
@@ -60,7 +67,7 @@ public class ThriftHiveMetastoreStats
 
     @Managed
     @Nested
-    public HiveMetastoreApiStats getAllViews()
+    public HiveMetastoreApiStats getGetAllViews()
     {
         return getAllViews;
     }
@@ -70,6 +77,16 @@ public class ThriftHiveMetastoreStats
     public HiveMetastoreApiStats getGetTable()
     {
         return getTable;
+    }
+
+    public HiveMetastoreApiStats getGetTableColumnStatistics()
+    {
+        return getTableColumnStatistics;
+    }
+
+    public HiveMetastoreApiStats getGetPartitionColumnStatistics()
+    {
+        return getPartitionColumnStatistics;
     }
 
     @Managed
@@ -98,6 +115,27 @@ public class ThriftHiveMetastoreStats
     public HiveMetastoreApiStats getGetPartitionsByNames()
     {
         return getPartitionsByNames;
+    }
+
+    @Managed
+    @Nested
+    public HiveMetastoreApiStats getCreateDatabase()
+    {
+        return createDatabase;
+    }
+
+    @Managed
+    @Nested
+    public HiveMetastoreApiStats getDropDatabase()
+    {
+        return dropDatabase;
+    }
+
+    @Managed
+    @Nested
+    public HiveMetastoreApiStats getAlterDatabase()
+    {
+        return alterDatabase;
     }
 
     @Managed
@@ -137,6 +175,13 @@ public class ThriftHiveMetastoreStats
 
     @Managed
     @Nested
+    public HiveMetastoreApiStats getAlterPartition()
+    {
+        return alterPartition;
+    }
+
+    @Managed
+    @Nested
     public HiveMetastoreApiStats getGrantTablePrivileges()
     {
         return grantTablePrivileges;
@@ -161,5 +206,12 @@ public class ThriftHiveMetastoreStats
     public HiveMetastoreApiStats getGetPrivilegeSet()
     {
         return getPrivilegeSet;
+    }
+
+    @Managed
+    @Nested
+    public HiveMetastoreApiStats getListPrivileges()
+    {
+        return listPrivileges;
     }
 }

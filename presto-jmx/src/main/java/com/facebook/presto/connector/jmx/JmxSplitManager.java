@@ -26,14 +26,13 @@ import com.facebook.presto.spi.predicate.NullableValue;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.inject.Inject;
+
+import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Optional;
 
 import static com.facebook.presto.connector.jmx.JmxMetadata.NODE_COLUMN_NAME;
-import static com.facebook.presto.connector.jmx.Types.checkType;
-import static com.facebook.presto.spi.NodeState.ACTIVE;
 import static com.facebook.presto.spi.predicate.TupleDomain.fromFixedValues;
 import static com.facebook.presto.spi.type.VarcharType.createUnboundedVarcharType;
 import static com.google.common.base.Preconditions.checkState;
@@ -55,7 +54,7 @@ public class JmxSplitManager
     @Override
     public ConnectorSplitSource getSplits(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorTableLayoutHandle layout)
     {
-        JmxTableLayoutHandle jmxLayout = checkType(layout, JmxTableLayoutHandle.class, "layout");
+        JmxTableLayoutHandle jmxLayout = (JmxTableLayoutHandle) layout;
         JmxTableHandle tableHandle = jmxLayout.getTable();
         TupleDomain<ColumnHandle> predicate = jmxLayout.getConstraint();
 
@@ -65,8 +64,7 @@ public class JmxSplitManager
                 .findFirst();
         checkState(nodeColumnHandle.isPresent(), "Failed to find %s column", NODE_COLUMN_NAME);
 
-        List<ConnectorSplit> splits = nodeManager.getNodes(ACTIVE)
-                .stream()
+        List<ConnectorSplit> splits = nodeManager.getAllNodes().stream()
                 .filter(node -> {
                     NullableValue value = NullableValue.of(createUnboundedVarcharType(), utf8Slice(node.getNodeIdentifier()));
                     return predicate.overlaps(fromFixedValues(ImmutableMap.of(nodeColumnHandle.get(), value)));

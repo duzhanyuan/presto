@@ -16,7 +16,6 @@ package com.facebook.presto.operator;
 import com.facebook.presto.ExceededMemoryLimitException;
 import com.facebook.presto.RowPagesBuilder;
 import com.facebook.presto.operator.HashBuilderOperator.HashBuilderOperatorFactory;
-import com.facebook.presto.operator.ParallelHashBuildOperator.ParallelHashBuildOperatorFactory;
 import com.facebook.presto.operator.ValuesOperator.ValuesOperatorFactory;
 import com.facebook.presto.operator.exchange.LocalExchange;
 import com.facebook.presto.operator.exchange.LocalExchange.LocalExchangeSinkFactory;
@@ -25,6 +24,8 @@ import com.facebook.presto.operator.exchange.LocalExchangeSourceOperator.LocalEx
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.sql.gen.JoinFilterFunctionCompiler.JoinFilterFunctionFactory;
+import com.facebook.presto.sql.gen.JoinProbeCompiler;
 import com.facebook.presto.sql.planner.plan.PlanNodeId;
 import com.facebook.presto.testing.MaterializedResult;
 import com.facebook.presto.testing.TestingTaskContext;
@@ -42,6 +43,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.function.Function;
+import java.util.stream.IntStream;
 
 import static com.facebook.presto.RowPagesBuilder.rowPagesBuilder;
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
@@ -49,6 +51,7 @@ import static com.facebook.presto.operator.OperatorAssertion.assertOperatorEqual
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.concat;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.DataSize.Unit.BYTE;
@@ -58,6 +61,7 @@ import static java.util.concurrent.Executors.newCachedThreadPool;
 public class TestHashJoinOperator
 {
     private static final int PARTITION_COUNT = 4;
+    private static final LookupJoinOperators LOOKUP_JOIN_OPERATORS = new LookupJoinOperators(new JoinProbeCompiler());
 
     private ExecutorService executor;
 
@@ -96,27 +100,25 @@ public class TestHashJoinOperator
         // build
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), ImmutableList.of(VARCHAR, BIGINT, BIGINT))
                 .addSequencePage(10, 20, 30, 40);
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
 
         // probe
-        RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), ImmutableList.<Type>of(VARCHAR, BIGINT, BIGINT));
+        RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), ImmutableList.of(VARCHAR, BIGINT, BIGINT));
         List<Page> probeInput = probePages
                 .addSequencePage(1000, 0, 1000, 2000)
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.innerJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.innerJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                false
+                Optional.empty()
         );
 
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
-
         // expected
-        MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probePages.getTypes(), buildPages.getTypes()))
+        MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probePages.getTypesWithoutHash(), buildPages.getTypesWithoutHash()))
                 .row("20", 1020L, 2020L, "20", 30L, 40L)
                 .row("21", 1021L, 2021L, "21", 31L, 41L)
                 .row("22", 1022L, 2022L, "22", 32L, 42L)
@@ -129,7 +131,7 @@ public class TestHashJoinOperator
                 .row("29", 1029L, 2029L, "29", 39L, 49L)
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -139,15 +141,15 @@ public class TestHashJoinOperator
         TaskContext taskContext = createTaskContext();
 
         // build
-        List<Type> buildTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> buildTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), buildTypes)
                 .row("a")
                 .row("b")
                 .row("c");
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .row("a")
@@ -156,25 +158,24 @@ public class TestHashJoinOperator
                 .row("a")
                 .row("b")
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.innerJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.innerJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                false
+                Optional.empty()
         );
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
 
         // expected
-        MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildPages.getTypes()))
+        MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildPages.getTypesWithoutHash()))
                 .row("a", "a")
                 .row("a", "a")
                 .row("b", "b")
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -184,33 +185,32 @@ public class TestHashJoinOperator
         TaskContext taskContext = createTaskContext();
 
         // build
-        List<Type> buildTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> buildTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), buildTypes)
                 .row("a")
                 .row((String) null)
                 .row((String) null)
                 .row("a")
                 .row("b");
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .row("a")
                 .row("b")
                 .row("c")
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.innerJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.innerJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                false
+                Optional.empty()
         );
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
 
         // expected
         MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildTypes))
@@ -219,7 +219,7 @@ public class TestHashJoinOperator
                 .row("b", "b")
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -229,17 +229,17 @@ public class TestHashJoinOperator
         TaskContext taskContext = createTaskContext();
 
         // build
-        List<Type> buildTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> buildTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), buildTypes)
                 .row("a")
                 .row((String) null)
                 .row((String) null)
                 .row("a")
                 .row("b");
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .row("a")
@@ -247,16 +247,15 @@ public class TestHashJoinOperator
                 .row((String) null)
                 .row("c")
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.innerJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.innerJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                false
+                Optional.empty()
         );
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
 
         // expected
         MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildTypes))
@@ -265,7 +264,7 @@ public class TestHashJoinOperator
                 .row("b", "b")
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -275,26 +274,25 @@ public class TestHashJoinOperator
         TaskContext taskContext = createTaskContext();
 
         // build
-        List<Type> buildTypes = ImmutableList.<Type>of(VARCHAR, BIGINT, BIGINT);
+        List<Type> buildTypes = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), ImmutableList.of(VARCHAR, BIGINT, BIGINT))
                 .addSequencePage(10, 20, 30, 40);
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR, BIGINT, BIGINT);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .addSequencePage(15, 20, 1020, 2020)
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.probeOuterJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.probeOuterJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                false);
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
+                Optional.empty());
 
         // expected
         // expected
@@ -316,7 +314,7 @@ public class TestHashJoinOperator
                 .row("34", 1034L, 2034L, null, null, null)
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -325,33 +323,30 @@ public class TestHashJoinOperator
     {
         TaskContext taskContext = createTaskContext();
 
-        JoinFilterFunction filterFunction = new TestJoinFilterFunction((
+        InternalJoinFilterFunction filterFunction = new TestInternalJoinFilterFunction((
                 (leftPosition, leftBlocks, rightPosition, rightBlocks) -> BIGINT.getLong(rightBlocks[1], rightPosition) >= 1025));
 
         // build
-        List<Type> buildTypes = ImmutableList.<Type>of(VARCHAR, BIGINT, BIGINT);
+        List<Type> buildTypes = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), ImmutableList.of(VARCHAR, BIGINT, BIGINT))
                 .addSequencePage(10, 20, 30, 40);
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.of(filterFunction));
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.of(filterFunction));
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR, BIGINT, BIGINT);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .addSequencePage(15, 20, 1020, 2020)
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.probeOuterJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.probeOuterJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                true);
+                Optional.empty());
 
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
-
-        // expected
         // expected
         MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildTypes))
                 .row("20", 1020L, 2020L, null, null, null)
@@ -371,7 +366,7 @@ public class TestHashJoinOperator
                 .row("34", 1034L, 2034L, null, null, null)
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -381,15 +376,15 @@ public class TestHashJoinOperator
         TaskContext taskContext = createTaskContext();
 
         // build
-        List<Type> buildTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> buildTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), buildTypes)
                 .row("a")
                 .row("b")
                 .row("c");
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .row("a")
@@ -398,15 +393,14 @@ public class TestHashJoinOperator
                 .row("a")
                 .row("b")
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.probeOuterJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.probeOuterJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                false);
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
+                Optional.empty());
 
         // expected
         MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildTypes))
@@ -417,7 +411,7 @@ public class TestHashJoinOperator
                 .row("b", "b")
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -426,19 +420,19 @@ public class TestHashJoinOperator
     {
         TaskContext taskContext = createTaskContext();
 
-        JoinFilterFunction filterFunction = new TestJoinFilterFunction((
+        InternalJoinFilterFunction filterFunction = new TestInternalJoinFilterFunction((
                 (leftPosition, leftBlocks, rightPosition, rightBlocks) -> VARCHAR.getSlice(rightBlocks[0], rightPosition).toStringAscii().equals("a")));
 
         // build
-        List<Type> buildTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> buildTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), buildTypes)
                 .row("a")
                 .row("b")
                 .row("c");
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.of(filterFunction));
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.of(filterFunction));
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .row("a")
@@ -447,15 +441,14 @@ public class TestHashJoinOperator
                 .row("a")
                 .row("b")
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.probeOuterJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.probeOuterJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                true);
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
+                Optional.empty());
 
         // expected
         MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildTypes))
@@ -466,7 +459,7 @@ public class TestHashJoinOperator
                 .row("b", null)
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -476,32 +469,31 @@ public class TestHashJoinOperator
         TaskContext taskContext = createTaskContext();
 
         // build
-        List<Type> buildTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> buildTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), ImmutableList.of(VARCHAR))
                 .row("a")
                 .row((String) null)
                 .row((String) null)
                 .row("a")
                 .row("b");
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .row("a")
                 .row("b")
                 .row("c")
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.probeOuterJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.probeOuterJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                false);
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
+                Optional.empty());
 
         // expected
         MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildTypes))
@@ -511,7 +503,7 @@ public class TestHashJoinOperator
                 .row("c", null)
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -520,37 +512,36 @@ public class TestHashJoinOperator
     {
         TaskContext taskContext = createTaskContext();
 
-        JoinFilterFunction filterFunction = new TestJoinFilterFunction((
+        InternalJoinFilterFunction filterFunction = new TestInternalJoinFilterFunction((
                 (leftPosition, leftBlocks, rightPosition, rightBlocks) ->
                         ImmutableSet.of("a", "c").contains(VARCHAR.getSlice(rightBlocks[0], rightPosition).toStringAscii())));
 
         // build
-        List<Type> buildTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> buildTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder buildPages = rowPagesBuilder(buildHashEnabled, Ints.asList(0), ImmutableList.of(VARCHAR))
                 .row("a")
                 .row((String) null)
                 .row((String) null)
                 .row("a")
                 .row("b");
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.of(filterFunction));
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.of(filterFunction));
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .row("a")
                 .row("b")
                 .row("c")
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.probeOuterJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.probeOuterJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                true);
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
+                Optional.empty());
 
         // expected
         MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildTypes))
@@ -560,7 +551,7 @@ public class TestHashJoinOperator
                 .row("c", null)
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -576,10 +567,10 @@ public class TestHashJoinOperator
                 .row((String) null)
                 .row("a")
                 .row("b");
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.empty());
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .row("a")
@@ -587,18 +578,17 @@ public class TestHashJoinOperator
                 .row((String) null)
                 .row("c")
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.probeOuterJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.probeOuterJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                false);
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
+                Optional.empty());
 
         // expected
-        MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildPages.getTypes()))
+        MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildPages.getTypesWithoutHash()))
                 .row("a", "a")
                 .row("a", "a")
                 .row("b", "b")
@@ -606,7 +596,7 @@ public class TestHashJoinOperator
                 .row("c", null)
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(dataProvider = "hashEnabledValues")
@@ -615,7 +605,7 @@ public class TestHashJoinOperator
     {
         TaskContext taskContext = createTaskContext();
 
-        JoinFilterFunction filterFunction = new TestJoinFilterFunction((
+        InternalJoinFilterFunction filterFunction = new TestInternalJoinFilterFunction((
                 (leftPosition, leftBlocks, rightPosition, rightBlocks) ->
                         ImmutableSet.of("a", "c").contains(VARCHAR.getSlice(rightBlocks[0], rightPosition).toStringAscii())));
 
@@ -626,10 +616,10 @@ public class TestHashJoinOperator
                 .row((String) null)
                 .row("a")
                 .row("b");
-        LookupSourceSupplier lookupSourceSupplier = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.of(filterFunction));
+        LookupSourceFactory lookupSourceFactory = buildHash(parallelBuild, taskContext, Ints.asList(0), buildPages, Optional.of(filterFunction));
 
         // probe
-        List<Type> probeTypes = ImmutableList.<Type>of(VARCHAR);
+        List<Type> probeTypes = ImmutableList.of(VARCHAR);
         RowPagesBuilder probePages = rowPagesBuilder(probeHashEnabled, Ints.asList(0), probeTypes);
         List<Page> probeInput = probePages
                 .row("a")
@@ -637,18 +627,17 @@ public class TestHashJoinOperator
                 .row((String) null)
                 .row("c")
                 .build();
-        OperatorFactory joinOperatorFactory = LookupJoinOperators.probeOuterJoin(
+        OperatorFactory joinOperatorFactory = LOOKUP_JOIN_OPERATORS.probeOuterJoin(
                 0,
                 new PlanNodeId("test"),
-                lookupSourceSupplier,
+                lookupSourceFactory,
                 probePages.getTypes(),
                 Ints.asList(0),
                 probePages.getHashChannel(),
-                true);
-        Operator joinOperator = joinOperatorFactory.createOperator(taskContext.addPipelineContext(true, true).addDriverContext());
+                Optional.empty());
 
         // expected
-        MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildPages.getTypes()))
+        MaterializedResult expected = MaterializedResult.resultBuilder(taskContext.getSession(), concat(probeTypes, buildPages.getTypesWithoutHash()))
                 .row("a", "a")
                 .row("a", "a")
                 .row("b", null)
@@ -656,7 +645,7 @@ public class TestHashJoinOperator
                 .row("c", null)
                 .build();
 
-        assertOperatorEquals(joinOperator, probeInput, expected, true, getHashChannels(probePages, buildPages));
+        assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true).addDriverContext(), probeInput, expected, true, getHashChannels(probePages, buildPages));
     }
 
     @Test(expectedExceptions = ExceededMemoryLimitException.class, expectedExceptionsMessageRegExp = "Query exceeded local memory limit of.*", dataProvider = "hashEnabledValues")
@@ -687,82 +676,74 @@ public class TestHashJoinOperator
         return hashChannels.build();
     }
 
-    private static LookupSourceSupplier buildHash(boolean parallelBuild, TaskContext taskContext, List<Integer> hashChannels, RowPagesBuilder buildPages, Optional<JoinFilterFunction> filterFunction)
+    private static LookupSourceFactory buildHash(boolean parallelBuild, TaskContext taskContext, List<Integer> hashChannels, RowPagesBuilder buildPages, Optional<InternalJoinFilterFunction> filterFunction)
     {
-        if (parallelBuild) {
-            LocalExchange localExchange = new LocalExchange(FIXED_HASH_DISTRIBUTION, PARTITION_COUNT, buildPages.getTypes(), hashChannels, buildPages.getHashChannel());
-            LocalExchangeSinkFactory sinkFactory = localExchange.createSinkFactory();
-            sinkFactory.noMoreSinkFactories();
+        Optional<JoinFilterFunctionFactory> filterFunctionFactory = filterFunction
+                .map(function -> (session, addresses, channels) -> new StandardJoinFilterFunction(function, addresses, channels, Optional.empty()));
 
-            // collect input data into the partitioned exchange
-            DriverContext collectDriverContext = taskContext.addPipelineContext(true, true).addDriverContext();
-            ValuesOperatorFactory valuesOperatorFactory = new ValuesOperatorFactory(0, new PlanNodeId("values"), buildPages.getTypes(), buildPages.build());
-            LocalExchangeSinkOperatorFactory sinkOperatorFactory = new LocalExchangeSinkOperatorFactory(1, new PlanNodeId("sink"), sinkFactory, Function.identity());
-            Driver driver = new Driver(collectDriverContext,
-                    valuesOperatorFactory.createOperator(collectDriverContext),
-                    sinkOperatorFactory.createOperator(collectDriverContext));
-            valuesOperatorFactory.close();
-            sinkOperatorFactory.close();
+        int partitionCount = parallelBuild ? PARTITION_COUNT : 1;
+        LocalExchange localExchange = new LocalExchange(FIXED_HASH_DISTRIBUTION, partitionCount, buildPages.getTypes(), hashChannels, buildPages.getHashChannel());
+        LocalExchangeSinkFactory sinkFactory = localExchange.createSinkFactory();
+        sinkFactory.noMoreSinkFactories();
 
-            while (!driver.isFinished()) {
-                driver.process();
-            }
+        // collect input data into the partitioned exchange
+        DriverContext collectDriverContext = taskContext.addPipelineContext(0, true, true).addDriverContext();
+        ValuesOperatorFactory valuesOperatorFactory = new ValuesOperatorFactory(0, new PlanNodeId("values"), buildPages.getTypes(), buildPages.build());
+        LocalExchangeSinkOperatorFactory sinkOperatorFactory = new LocalExchangeSinkOperatorFactory(1, new PlanNodeId("sink"), sinkFactory, Function.identity());
+        Driver driver = new Driver(collectDriverContext,
+                valuesOperatorFactory.createOperator(collectDriverContext),
+                sinkOperatorFactory.createOperator(collectDriverContext));
+        valuesOperatorFactory.close();
+        sinkOperatorFactory.close();
 
-            // build hash tables
-            LocalExchangeSourceOperatorFactory sourceOperatorFactory = new LocalExchangeSourceOperatorFactory(0, new PlanNodeId("source"), localExchange);
-            ParallelHashBuildOperatorFactory buildOperatorFactory = new ParallelHashBuildOperatorFactory(
-                    1,
-                    new PlanNodeId("build"),
-                    buildPages.getTypes(),
-                    ImmutableMap.of(),
-                    hashChannels,
-                    buildPages.getHashChannel(),
-                    false,
-                    filterFunction,
-                    100,
-                    PARTITION_COUNT);
-            PipelineContext buildPipeline = taskContext.addPipelineContext(true, true);
-            for (int i = 0; i < PARTITION_COUNT; i++) {
-                DriverContext buildDriverContext = buildPipeline.addDriverContext();
-                Driver buildDriver = new Driver(buildDriverContext,
-                        sourceOperatorFactory.createOperator(buildDriverContext),
-                        buildOperatorFactory.createOperator(buildDriverContext));
-
-                while (!buildDriver.isFinished()) {
-                    buildDriver.process();
-                }
-            }
-
-            return buildOperatorFactory.getLookupSourceSupplier();
+        while (!driver.isFinished()) {
+            driver.process();
         }
-        else {
-            DriverContext driverContext = taskContext.addPipelineContext(true, true).addDriverContext();
 
-            ValuesOperatorFactory valuesOperatorFactory = new ValuesOperatorFactory(0, new PlanNodeId("test"), buildPages.getTypes(), buildPages.build());
-            HashBuilderOperatorFactory hashBuilderOperatorFactory = new HashBuilderOperatorFactory(
-                    1,
-                    new PlanNodeId("test"),
-                    buildPages.getTypes(),
-                    ImmutableMap.of(),
-                    hashChannels,
-                    buildPages.getHashChannel(),
-                    false,
-                    filterFunction,
-                    100);
+        // build hash tables
+        LocalExchangeSourceOperatorFactory sourceOperatorFactory = new LocalExchangeSourceOperatorFactory(0, new PlanNodeId("source"), localExchange);
+        HashBuilderOperatorFactory buildOperatorFactory = new HashBuilderOperatorFactory(
+                1,
+                new PlanNodeId("build"),
+                buildPages.getTypes(),
+                rangeList(buildPages.getTypes().size()),
+                ImmutableMap.of(),
+                hashChannels,
+                buildPages.getHashChannel(),
+                false,
+                filterFunctionFactory,
+                100,
+                partitionCount,
+                new PagesIndex.TestingFactory());
+        PipelineContext buildPipeline = taskContext.addPipelineContext(1, true, true);
 
-            Driver driver = new Driver(driverContext,
-                    valuesOperatorFactory.createOperator(driverContext),
-                    hashBuilderOperatorFactory.createOperator(driverContext));
-
-            while (!driver.isFinished()) {
-                driver.process();
-            }
-            return hashBuilderOperatorFactory.getLookupSourceSupplier();
+        Driver[] buildDrivers = new Driver[partitionCount];
+        for (int i = 0; i < partitionCount; i++) {
+            DriverContext buildDriverContext = buildPipeline.addDriverContext();
+            buildDrivers[i] = new Driver(
+                    buildDriverContext,
+                    sourceOperatorFactory.createOperator(buildDriverContext),
+                    buildOperatorFactory.createOperator(buildDriverContext));
         }
+
+        while (!buildOperatorFactory.getLookupSourceFactory().createLookupSource().isDone()) {
+            for (Driver buildDriver : buildDrivers) {
+                buildDriver.process();
+            }
+        }
+
+        return buildOperatorFactory.getLookupSourceFactory();
     }
 
-    private static class TestJoinFilterFunction
-            implements JoinFilterFunction
+    private static List<Integer> rangeList(int endExclusive)
+    {
+        return IntStream.range(0, endExclusive)
+                .boxed()
+                .collect(toImmutableList());
+    }
+
+    private static class TestInternalJoinFilterFunction
+            implements InternalJoinFilterFunction
     {
         public interface Lambda
         {
@@ -771,7 +752,7 @@ public class TestHashJoinOperator
 
         private final Lambda lambda;
 
-        private TestJoinFilterFunction(Lambda lambda)
+        private TestInternalJoinFilterFunction(Lambda lambda)
         {
             this.lambda = lambda;
         }

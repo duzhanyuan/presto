@@ -17,35 +17,38 @@ import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PageBuilder;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.sql.planner.SortExpressionExtractor.SortExpression;
 import com.facebook.presto.type.TypeUtils;
 import com.google.common.collect.ImmutableList;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
 
 public class SimplePagesHashStrategy
         implements PagesHashStrategy
 {
-    private static final Block[] EMPTY_BLOCK_ARRAY = new Block[0];
     private final List<Type> types;
+    private final List<Integer> outputChannels;
     private final List<List<Block>> channels;
-    private final List<Block[]> channelArrays;
     private final List<Integer> hashChannels;
     private final List<Block> precomputedHashChannel;
-    private final Optional<JoinFilterFunction> filterFunction;
+    private final Optional<SortExpression> sortChannel;
 
-    public SimplePagesHashStrategy(List<Type> types, List<List<Block>> channels, List<Integer> hashChannels, Optional<Integer> precomputedHashChannel, Optional<JoinFilterFunction> filterFunction)
+    public SimplePagesHashStrategy(
+            List<Type> types,
+            List<Integer> outputChannels,
+            List<List<Block>> channels,
+            List<Integer> hashChannels,
+            Optional<Integer> precomputedHashChannel,
+            Optional<SortExpression> sortChannel)
     {
-        this.filterFunction = filterFunction;
         this.types = ImmutableList.copyOf(requireNonNull(types, "types is null"));
+        this.outputChannels = ImmutableList.copyOf(requireNonNull(outputChannels, "outputChannels is null"));
         this.channels = ImmutableList.copyOf(requireNonNull(channels, "channels is null"));
-        this.channelArrays = buildChannelArrays(channels);
 
         checkArgument(types.size() == channels.size(), "Expected types and channels to be the same length");
         this.hashChannels = ImmutableList.copyOf(requireNonNull(hashChannels, "hashChannels is null"));
@@ -55,30 +58,13 @@ public class SimplePagesHashStrategy
         else {
             this.precomputedHashChannel = null;
         }
-    }
-
-    private List<Block[]> buildChannelArrays(List<List<Block>> channels)
-    {
-        if (channels.isEmpty()) {
-            return new ArrayList<>();
-        }
-
-        int pagesCount = channels.get(0).size();
-        List<Block[]> channelArrays = new ArrayList<>();
-        for (int i = 0; i < pagesCount; ++i) {
-            Block[] blocks = new Block[channels.size()];
-            for (int j = 0; j < channels.size(); ++j) {
-                blocks[j] = channels.get(j).get(i);
-            }
-            channelArrays.add(blocks);
-        }
-        return channelArrays;
+        this.sortChannel = requireNonNull(sortChannel, "sortChannel is null");
     }
 
     @Override
     public int getChannelCount()
     {
-        return channels.size();
+        return outputChannels.size();
     }
 
     @Override
@@ -93,9 +79,9 @@ public class SimplePagesHashStrategy
     @Override
     public void appendTo(int blockIndex, int position, PageBuilder pageBuilder, int outputChannelOffset)
     {
-        for (int i = 0; i < channels.size(); i++) {
-            Type type = types.get(i);
-            List<Block> channel = channels.get(i);
+        for (int outputIndex : outputChannels) {
+            Type type = types.get(outputIndex);
+            List<Block> channel = channels.get(outputIndex);
             Block block = channel.get(blockIndex);
             type.appendTo(block, position, pageBuilder.getBlockBuilder(outputChannelOffset));
             outputChannelOffset++;
@@ -133,7 +119,6 @@ public class SimplePagesHashStrategy
     @Override
     public boolean rowEqualsRow(int leftPosition, Page leftPage, int rightPosition, Page rightPage)
     {
-        checkState(!filterFunction.isPresent(), "filterFunction not supported for rowEqualsRow");
         for (int i = 0; i < hashChannels.size(); i++) {
             int hashChannel = hashChannels.get(i);
             Type type = types.get(hashChannel);
@@ -222,37 +207,45 @@ public class SimplePagesHashStrategy
     }
 
     @Override
-    public Optional<JoinFilterFunction> getFilterFunction()
-    {
-        return filterFunction;
-    }
-
-    @Override
-    public boolean applyFilterFunction(int leftBlockIndex, int leftPosition, int rightPosition, Block[] allRightBlocks)
-    {
-        return filterFunction.get().filter(leftPosition, getLeftBlocks(leftBlockIndex), rightPosition, allRightBlocks);
-    }
-
-    private Block[] getLeftBlocks(int leftBlockIndex)
-    {
-        if (channelArrays.isEmpty()) {
-            return EMPTY_BLOCK_ARRAY;
-        }
-        else {
-            return channelArrays.get(leftBlockIndex);
-        }
-    }
-
-    @Override
     public boolean isPositionNull(int blockIndex, int blockPosition)
     {
         for (int hashChannel : hashChannels) {
-            List<Block> channel = channels.get(hashChannel);
-            Block block = channel.get(blockIndex);
-            if (block.isNull(blockPosition)) {
+            if (isChannelPositionNull(hashChannel, blockIndex, blockPosition)) {
                 return true;
             }
         }
         return false;
+    }
+
+    @Override
+    public int compareSortChannelPositions(int leftBlockIndex, int leftBlockPosition, int rightBlockIndex, int rightBlockPosition)
+    {
+        int channel = getSortChannel();
+
+        Block leftBlock = channels.get(channel).get(leftBlockIndex);
+        Block rightBlock = channels.get(channel).get(rightBlockIndex);
+
+        return types.get(channel).compareTo(leftBlock, leftBlockPosition, rightBlock, rightBlockPosition);
+    }
+
+    @Override
+    public boolean isSortChannelPositionNull(int blockIndex, int blockPosition)
+    {
+        return isChannelPositionNull(getSortChannel(), blockIndex, blockPosition);
+    }
+
+    private boolean isChannelPositionNull(int channelIndex, int blockIndex, int blockPosition)
+    {
+        List<Block> channel = channels.get(channelIndex);
+        Block block = channel.get(blockIndex);
+        return block.isNull(blockPosition);
+    }
+
+    private int getSortChannel()
+    {
+        if (!sortChannel.isPresent()) {
+            throw new UnsupportedOperationException();
+        }
+        return sortChannel.get().getChannel();
     }
 }

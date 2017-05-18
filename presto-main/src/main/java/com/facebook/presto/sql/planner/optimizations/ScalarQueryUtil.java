@@ -13,30 +13,56 @@
  */
 package com.facebook.presto.sql.planner.optimizations;
 
+import com.facebook.presto.sql.planner.iterative.GroupReference;
+import com.facebook.presto.sql.planner.iterative.Lookup;
+import com.facebook.presto.sql.planner.plan.AggregationNode;
 import com.facebook.presto.sql.planner.plan.EnforceSingleRowNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.FilterNode;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.PlanVisitor;
 import com.facebook.presto.sql.planner.plan.ProjectNode;
+import com.facebook.presto.sql.planner.plan.ValuesNode;
+import com.google.common.collect.ImmutableList;
 
+import java.util.Optional;
+
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static java.util.Objects.requireNonNull;
 
 public final class ScalarQueryUtil
 {
     private ScalarQueryUtil() {}
 
+    public static boolean isScalar(PlanNode node, Lookup lookup)
+    {
+        return node.accept(new IsScalarPlanVisitor(Optional.ofNullable(lookup)), null);
+    }
+
     public static boolean isScalar(PlanNode node)
     {
-        return node.accept(new IsScalarPlanVisitor(), null);
+        return isScalar(node, null);
     }
 
     private static final class IsScalarPlanVisitor
             extends PlanVisitor<Void, Boolean>
     {
+        private final Optional<Lookup> lookup;
+
+        public IsScalarPlanVisitor(Optional<Lookup> lookup)
+        {
+            this.lookup = requireNonNull(lookup, "lookup is null");
+        }
+
         @Override
         protected Boolean visitPlan(PlanNode node, Void context)
         {
+            if (node instanceof GroupReference) {
+                checkState(lookup.isPresent(), "Lookup has to be provided to test plans with GroupReference nodes");
+                return lookup.get().resolve(node).accept(this, null);
+            }
+
             return false;
         }
 
@@ -44,6 +70,12 @@ public final class ScalarQueryUtil
         public Boolean visitEnforceSingleRow(EnforceSingleRowNode node, Void context)
         {
             return true;
+        }
+
+        @Override
+        public Boolean visitAggregation(AggregationNode node, Void context)
+        {
+            return node.getGroupingSets().equals(ImmutableList.of(ImmutableList.of()));
         }
 
         @Override
@@ -63,6 +95,11 @@ public final class ScalarQueryUtil
         public Boolean visitFilter(FilterNode node, Void context)
         {
             return node.getSource().accept(this, null);
+        }
+
+        public Boolean visitValues(ValuesNode node, Void context)
+        {
+            return node.getRows().size() == 1;
         }
     }
 }

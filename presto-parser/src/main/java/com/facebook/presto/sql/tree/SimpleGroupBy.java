@@ -24,8 +24,8 @@ import java.util.Set;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
 
-public class SimpleGroupBy
-    extends GroupingElement
+public final class SimpleGroupBy
+        extends GroupingElement
 {
     private final List<Expression> columns;
 
@@ -42,7 +42,7 @@ public class SimpleGroupBy
     private SimpleGroupBy(Optional<NodeLocation> location, List<Expression> simpleGroupByExpressions)
     {
         super(location);
-        this.columns = requireNonNull(simpleGroupByExpressions);
+        this.columns = ImmutableList.copyOf(requireNonNull(simpleGroupByExpressions, "simpleGroupByExpressions is null"));
     }
 
     public List<Expression> getColumnExpressions()
@@ -60,6 +60,12 @@ public class SimpleGroupBy
     protected <R, C> R accept(AstVisitor<R, C> visitor, C context)
     {
         return visitor.visitSimpleGroupBy(this, context);
+    }
+
+    @Override
+    public List<? extends Node> getChildren()
+    {
+        return columns;
     }
 
     @Override

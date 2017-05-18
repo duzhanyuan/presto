@@ -17,7 +17,7 @@ import com.facebook.presto.hive.HdfsEnvironment;
 import com.facebook.presto.hive.HiveClientConfig;
 import com.facebook.presto.hive.HiveColumnHandle;
 import com.facebook.presto.hive.HivePageSourceFactory;
-import com.facebook.presto.hive.HivePartitionKey;
+import com.facebook.presto.hive.parquet.memory.AggregatedMemoryContext;
 import com.facebook.presto.hive.parquet.predicate.ParquetPredicate;
 import com.facebook.presto.hive.parquet.reader.ParquetMetadataReader;
 import com.facebook.presto.hive.parquet.reader.ParquetReader;
@@ -26,12 +26,12 @@ import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.type.TypeManager;
-import com.facebook.presto.spi.type.TypeSignature;
 import com.google.common.collect.ImmutableSet;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.joda.time.DateTimeZone;
+import parquet.column.ColumnDescriptor;
 import parquet.hadoop.metadata.BlockMetaData;
 import parquet.hadoop.metadata.FileMetaData;
 import parquet.hadoop.metadata.ParquetMetadata;
@@ -47,6 +47,7 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 
+import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_CANNOT_OPEN_SPLIT;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_MISSING_DATA;
 import static com.facebook.presto.hive.HiveSessionProperties.isParquetOptimizedReaderEnabled;
@@ -55,18 +56,8 @@ import static com.facebook.presto.hive.HiveUtil.getDeserializerClassName;
 import static com.facebook.presto.hive.parquet.HdfsParquetDataSource.buildHdfsParquetDataSource;
 import static com.facebook.presto.hive.parquet.ParquetTypeUtils.getParquetType;
 import static com.facebook.presto.hive.parquet.predicate.ParquetPredicateUtils.buildParquetPredicate;
+import static com.facebook.presto.hive.parquet.predicate.ParquetPredicateUtils.getParquetTupleDomain;
 import static com.facebook.presto.hive.parquet.predicate.ParquetPredicateUtils.predicateMatches;
-import static com.facebook.presto.spi.type.StandardTypes.BIGINT;
-import static com.facebook.presto.spi.type.StandardTypes.BOOLEAN;
-import static com.facebook.presto.spi.type.StandardTypes.DATE;
-import static com.facebook.presto.spi.type.StandardTypes.DECIMAL;
-import static com.facebook.presto.spi.type.StandardTypes.DOUBLE;
-import static com.facebook.presto.spi.type.StandardTypes.INTEGER;
-import static com.facebook.presto.spi.type.StandardTypes.SMALLINT;
-import static com.facebook.presto.spi.type.StandardTypes.TIMESTAMP;
-import static com.facebook.presto.spi.type.StandardTypes.TINYINT;
-import static com.facebook.presto.spi.type.StandardTypes.VARBINARY;
-import static com.facebook.presto.spi.type.StandardTypes.VARCHAR;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
@@ -78,8 +69,6 @@ public class ParquetPageSourceFactory
             .add("org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe")
             .add("parquet.hive.serde.ParquetHiveSerDe")
             .build();
-    private static final Set<String> SUPPORTED_COLUMN_TYPES = ImmutableSet.of(INTEGER, BIGINT, BOOLEAN, DOUBLE, TIMESTAMP, VARCHAR, VARBINARY, DATE, DECIMAL);
-    private static final Set<String> SUPPORTED_PARTITION_TYPES = ImmutableSet.of(TINYINT, SMALLINT, INTEGER, BIGINT, BOOLEAN, DOUBLE, TIMESTAMP, VARCHAR, DATE, DECIMAL);
 
     private final TypeManager typeManager;
     private final boolean useParquetColumnNames;
@@ -107,7 +96,6 @@ public class ParquetPageSourceFactory
             long length,
             Properties schema,
             List<HiveColumnHandle> columns,
-            List<HivePartitionKey> partitionKeys,
             TupleDomain<HiveColumnHandle> effectivePredicate,
             DateTimeZone hiveStorageTimeZone)
     {
@@ -116,10 +104,6 @@ public class ParquetPageSourceFactory
         }
 
         if (!PARQUET_SERDE_CLASS_NAMES.contains(getDeserializerClassName(schema))) {
-            return Optional.empty();
-        }
-
-        if (!columnTypeSupported(columns)) {
             return Optional.empty();
         }
 
@@ -132,9 +116,7 @@ public class ParquetPageSourceFactory
                 length,
                 schema,
                 columns,
-                partitionKeys,
                 useParquetColumnNames,
-                hiveStorageTimeZone,
                 typeManager,
                 isParquetPredicatePushdownEnabled(session),
                 effectivePredicate));
@@ -149,13 +131,13 @@ public class ParquetPageSourceFactory
             long length,
             Properties schema,
             List<HiveColumnHandle> columns,
-            List<HivePartitionKey> partitionKeys,
             boolean useParquetColumnNames,
-            DateTimeZone hiveStorageTimeZone,
             TypeManager typeManager,
             boolean predicatePushdownEnabled,
             TupleDomain<HiveColumnHandle> effectivePredicate)
     {
+        AggregatedMemoryContext systemMemoryContext = new AggregatedMemoryContext();
+
         ParquetDataSource dataSource = null;
         try {
             FileSystem fileSystem = hdfsEnvironment.getFileSystem(user, path, configuration);
@@ -165,7 +147,7 @@ public class ParquetPageSourceFactory
             MessageType fileSchema = fileMetaData.getSchema();
 
             List<parquet.schema.Type> fields = columns.stream()
-                    .filter(column -> !column.isPartitionKey())
+                    .filter(column -> column.getColumnType() == REGULAR)
                     .map(column -> getParquetType(column, fileSchema, useParquetColumnNames))
                     .filter(Objects::nonNull)
                     .collect(toList());
@@ -181,20 +163,21 @@ public class ParquetPageSourceFactory
             }
 
             if (predicatePushdownEnabled) {
-                ParquetPredicate parquetPredicate = buildParquetPredicate(columns, effectivePredicate, fileMetaData.getSchema(), typeManager);
+                TupleDomain<ColumnDescriptor> parquetTupleDomain = getParquetTupleDomain(fileSchema, requestedSchema, effectivePredicate);
+                ParquetPredicate parquetPredicate = buildParquetPredicate(requestedSchema, parquetTupleDomain, fileMetaData.getSchema());
                 final ParquetDataSource finalDataSource = dataSource;
                 blocks = blocks.stream()
-                        .filter(block -> predicateMatches(parquetPredicate, block, finalDataSource, requestedSchema, effectivePredicate))
+                        .filter(block -> predicateMatches(parquetPredicate, block, finalDataSource, fileSchema, requestedSchema, parquetTupleDomain))
                         .collect(toList());
             }
 
             ParquetReader parquetReader = new ParquetReader(
-                    fileMetaData.getSchema(),
-                    fileMetaData.getKeyValueMetaData(),
+                    fileSchema,
                     requestedSchema,
                     blocks,
-                    configuration,
-                    dataSource);
+                    dataSource,
+                    typeManager,
+                    systemMemoryContext);
 
             return new ParquetPageSource(
                     parquetReader,
@@ -204,11 +187,10 @@ public class ParquetPageSourceFactory
                     length,
                     schema,
                     columns,
-                    partitionKeys,
                     effectivePredicate,
-                    hiveStorageTimeZone,
                     typeManager,
-                    useParquetColumnNames);
+                    useParquetColumnNames,
+                    systemMemoryContext);
         }
         catch (Exception e) {
             try {
@@ -227,23 +209,5 @@ public class ParquetPageSourceFactory
             }
             throw new PrestoException(HIVE_CANNOT_OPEN_SPLIT, message, e);
         }
-    }
-
-    // TODO: support complex types
-    private static boolean columnTypeSupported(List<HiveColumnHandle> columns)
-    {
-        boolean nonPartitionColumnsSupported = columns.stream()
-                .filter(column -> !column.isPartitionKey())
-                .map(HiveColumnHandle::getTypeSignature)
-                .map(TypeSignature::getBase)
-                .allMatch(SUPPORTED_COLUMN_TYPES::contains);
-
-        boolean partitionColumnsSupported = columns.stream()
-                .filter(HiveColumnHandle::isPartitionKey)
-                .map(HiveColumnHandle::getTypeSignature)
-                .map(TypeSignature::getBase)
-                .allMatch(SUPPORTED_PARTITION_TYPES::contains);
-
-        return nonPartitionColumnsSupported && partitionColumnsSupported;
     }
 }

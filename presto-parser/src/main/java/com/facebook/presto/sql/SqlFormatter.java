@@ -19,12 +19,17 @@ import com.facebook.presto.sql.tree.AllColumns;
 import com.facebook.presto.sql.tree.AstVisitor;
 import com.facebook.presto.sql.tree.Call;
 import com.facebook.presto.sql.tree.CallArgument;
+import com.facebook.presto.sql.tree.ColumnDefinition;
 import com.facebook.presto.sql.tree.Commit;
+import com.facebook.presto.sql.tree.CreateSchema;
 import com.facebook.presto.sql.tree.CreateTable;
 import com.facebook.presto.sql.tree.CreateTableAsSelect;
 import com.facebook.presto.sql.tree.CreateView;
 import com.facebook.presto.sql.tree.Deallocate;
 import com.facebook.presto.sql.tree.Delete;
+import com.facebook.presto.sql.tree.DescribeInput;
+import com.facebook.presto.sql.tree.DescribeOutput;
+import com.facebook.presto.sql.tree.DropSchema;
 import com.facebook.presto.sql.tree.DropTable;
 import com.facebook.presto.sql.tree.DropView;
 import com.facebook.presto.sql.tree.Except;
@@ -42,14 +47,17 @@ import com.facebook.presto.sql.tree.Join;
 import com.facebook.presto.sql.tree.JoinCriteria;
 import com.facebook.presto.sql.tree.JoinOn;
 import com.facebook.presto.sql.tree.JoinUsing;
+import com.facebook.presto.sql.tree.LikeClause;
 import com.facebook.presto.sql.tree.NaturalJoin;
 import com.facebook.presto.sql.tree.Node;
+import com.facebook.presto.sql.tree.OrderBy;
 import com.facebook.presto.sql.tree.Prepare;
 import com.facebook.presto.sql.tree.QualifiedName;
 import com.facebook.presto.sql.tree.Query;
 import com.facebook.presto.sql.tree.QuerySpecification;
 import com.facebook.presto.sql.tree.Relation;
 import com.facebook.presto.sql.tree.RenameColumn;
+import com.facebook.presto.sql.tree.RenameSchema;
 import com.facebook.presto.sql.tree.RenameTable;
 import com.facebook.presto.sql.tree.ResetSession;
 import com.facebook.presto.sql.tree.Revoke;
@@ -63,9 +71,11 @@ import com.facebook.presto.sql.tree.ShowCatalogs;
 import com.facebook.presto.sql.tree.ShowColumns;
 import com.facebook.presto.sql.tree.ShowCreate;
 import com.facebook.presto.sql.tree.ShowFunctions;
+import com.facebook.presto.sql.tree.ShowGrants;
 import com.facebook.presto.sql.tree.ShowPartitions;
 import com.facebook.presto.sql.tree.ShowSchemas;
 import com.facebook.presto.sql.tree.ShowSession;
+import com.facebook.presto.sql.tree.ShowStats;
 import com.facebook.presto.sql.tree.ShowTables;
 import com.facebook.presto.sql.tree.SingleColumn;
 import com.facebook.presto.sql.tree.StartTransaction;
@@ -85,15 +95,17 @@ import com.google.common.collect.ImmutableSortedMap;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 import static com.facebook.presto.sql.ExpressionFormatter.formatExpression;
 import static com.facebook.presto.sql.ExpressionFormatter.formatGroupBy;
+import static com.facebook.presto.sql.ExpressionFormatter.formatOrderBy;
 import static com.facebook.presto.sql.ExpressionFormatter.formatSortItems;
 import static com.facebook.presto.sql.ExpressionFormatter.formatStringLiteral;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static com.google.common.collect.Iterables.transform;
 import static java.util.stream.Collectors.joining;
 
 public final class SqlFormatter
@@ -103,17 +115,10 @@ public final class SqlFormatter
 
     private SqlFormatter() {}
 
-    public static String formatSql(Node root)
+    public static String formatSql(Node root, Optional<List<Expression>> parameters)
     {
         StringBuilder builder = new StringBuilder();
-        new Formatter(builder, true).process(root, 0);
-        return builder.toString();
-    }
-
-    public static String formatSql(Node root, boolean unmangleNames)
-    {
-        StringBuilder builder = new StringBuilder();
-        new Formatter(builder, unmangleNames).process(root, 0);
+        new Formatter(builder, parameters).process(root, 0);
         return builder.toString();
     }
 
@@ -121,12 +126,12 @@ public final class SqlFormatter
             extends AstVisitor<Void, Integer>
     {
         private final StringBuilder builder;
-        private final boolean unmangledNames;
+        private final Optional<List<Expression>> parameters;
 
-        public Formatter(StringBuilder builder, boolean unmangleNames)
+        public Formatter(StringBuilder builder, Optional<List<Expression>> parameters)
         {
             this.builder = builder;
-            this.unmangledNames = unmangleNames;
+            this.parameters = parameters;
         }
 
         @Override
@@ -139,7 +144,7 @@ public final class SqlFormatter
         protected Void visitExpression(Expression node, Integer indent)
         {
             checkArgument(indent == 0, "visitExpression should only be called at root");
-            builder.append(formatExpression(node, unmangledNames));
+            builder.append(formatExpression(node, parameters));
             return null;
         }
 
@@ -174,6 +179,27 @@ public final class SqlFormatter
         {
             append(indent, "EXECUTE ");
             builder.append(node.getName());
+            List<Expression> parameters = node.getParameters();
+            if (!parameters.isEmpty()) {
+                builder.append(" USING ");
+                Joiner.on(", ").appendTo(builder, parameters);
+            }
+            return null;
+        }
+
+        @Override
+        protected Void visitDescribeOutput(DescribeOutput node, Integer indent)
+        {
+            append(indent, "DESCRIBE OUTPUT ");
+            builder.append(node.getName());
+            return null;
+        }
+
+        @Override
+        protected Void visitDescribeInput(DescribeInput node, Integer indent)
+        {
+            append(indent, "DESCRIBE INPUT ");
+            builder.append(node.getName());
             return null;
         }
 
@@ -203,19 +229,12 @@ public final class SqlFormatter
 
             processRelation(node.getQueryBody(), indent);
 
-            if (!node.getOrderBy().isEmpty()) {
-                append(indent, "ORDER BY " + formatSortItems(node.getOrderBy()))
-                        .append('\n');
+            if (node.getOrderBy().isPresent()) {
+                process(node.getOrderBy().get(), indent);
             }
 
             if (node.getLimit().isPresent()) {
                 append(indent, "LIMIT " + node.getLimit().get())
-                        .append('\n');
-            }
-
-            if (node.getApproximate().isPresent()) {
-                String confidence = node.getApproximate().get().getConfidence();
-                append(indent, "APPROXIMATE AT " + confidence + " CONFIDENCE")
                         .append('\n');
             }
 
@@ -237,7 +256,7 @@ public final class SqlFormatter
             builder.append('\n');
 
             if (node.getWhere().isPresent()) {
-                append(indent, "WHERE " + formatExpression(node.getWhere().get()))
+                append(indent, "WHERE " + formatExpression(node.getWhere().get(), parameters))
                         .append('\n');
             }
 
@@ -246,19 +265,26 @@ public final class SqlFormatter
             }
 
             if (node.getHaving().isPresent()) {
-                append(indent, "HAVING " + formatExpression(node.getHaving().get()))
+                append(indent, "HAVING " + formatExpression(node.getHaving().get(), parameters))
                         .append('\n');
             }
 
-            if (!node.getOrderBy().isEmpty()) {
-                append(indent, "ORDER BY " + formatSortItems(node.getOrderBy()))
-                        .append('\n');
+            if (node.getOrderBy().isPresent()) {
+                process(node.getOrderBy().get(), indent);
             }
 
             if (node.getLimit().isPresent()) {
                 append(indent, "LIMIT " + node.getLimit().get())
                         .append('\n');
             }
+            return null;
+        }
+
+        @Override
+        protected Void visitOrderBy(OrderBy node, Integer indent)
+        {
+            append(indent, formatOrderBy(node, parameters))
+                    .append('\n');
             return null;
         }
 
@@ -294,7 +320,7 @@ public final class SqlFormatter
         @Override
         protected Void visitSingleColumn(SingleColumn node, Integer indent)
         {
-            builder.append(formatExpression(node.getExpression()));
+            builder.append(formatExpression(node.getExpression(), parameters));
             if (node.getAlias().isPresent()) {
                 builder.append(' ')
                         .append('"')
@@ -316,7 +342,8 @@ public final class SqlFormatter
         @Override
         protected Void visitTable(Table node, Integer indent)
         {
-            builder.append(node.getName().toString());
+            builder.append(formatName(node.getName()));
+
             return null;
         }
 
@@ -353,9 +380,8 @@ public final class SqlFormatter
                 }
                 else if (criteria instanceof JoinOn) {
                     JoinOn on = (JoinOn) criteria;
-                    builder.append(" ON (")
-                            .append(formatExpression(on.getExpression()))
-                            .append(")");
+                    builder.append(" ON ")
+                            .append(formatExpression(on.getExpression(), parameters));
                 }
                 else if (!(criteria instanceof NaturalJoin)) {
                     throw new UnsupportedOperationException("unknown join criteria: " + criteria);
@@ -375,8 +401,7 @@ public final class SqlFormatter
             process(node.getRelation(), indent);
 
             builder.append(' ')
-                    .append(node.getAlias());
-
+                    .append(formatName(node.getAlias()));
             appendAliasColumns(builder, node.getColumnNames());
 
             return null;
@@ -393,13 +418,6 @@ public final class SqlFormatter
                     .append(node.getSamplePercentage())
                     .append(')');
 
-            if (node.getColumnsToStratifyOn().isPresent()) {
-                builder.append(" STRATIFY ON ")
-                        .append(" (")
-                        .append(Joiner.on(",").join(node.getColumnsToStratifyOn().get()));
-                builder.append(')');
-            }
-
             return null;
         }
 
@@ -414,7 +432,7 @@ public final class SqlFormatter
                         .append(indentString(indent))
                         .append(first ? "  " : ", ");
 
-                builder.append(formatExpression(row));
+                builder.append(formatExpression(row, parameters));
                 first = false;
             }
             builder.append('\n');
@@ -496,7 +514,7 @@ public final class SqlFormatter
                 builder.append("OR REPLACE ");
             }
             builder.append("VIEW ")
-                    .append(node.getName())
+                    .append(formatName(node.getName()))
                     .append(" AS\n");
 
             process(node.getQuery(), indent);
@@ -585,11 +603,11 @@ public final class SqlFormatter
         {
             builder.append("SHOW TABLES");
 
-            node.getSchema().ifPresent((value) ->
+            node.getSchema().ifPresent(value ->
                     builder.append(" FROM ")
-                            .append(value));
+                            .append(formatName(value)));
 
-            node.getLikePattern().ifPresent((value) ->
+            node.getLikePattern().ifPresent(value ->
                     builder.append(" LIKE ")
                             .append(formatStringLiteral(value)));
 
@@ -615,8 +633,17 @@ public final class SqlFormatter
         protected Void visitShowColumns(ShowColumns node, Integer context)
         {
             builder.append("SHOW COLUMNS FROM ")
-                    .append(node.getTable());
+                    .append(formatName(node.getTable()));
 
+            return null;
+        }
+
+        @Override
+        protected Void visitShowStats(ShowStats node, Integer context)
+        {
+            builder.append("SHOW STATS FOR ");
+            process(node.getRelation(), 0);
+            builder.append("");
             return null;
         }
 
@@ -624,16 +651,16 @@ public final class SqlFormatter
         protected Void visitShowPartitions(ShowPartitions node, Integer context)
         {
             builder.append("SHOW PARTITIONS FROM ")
-                    .append(node.getTable());
+                    .append(formatName(node.getTable()));
 
             if (node.getWhere().isPresent()) {
                 builder.append(" WHERE ")
-                        .append(formatExpression(node.getWhere().get()));
+                        .append(formatExpression(node.getWhere().get(), parameters));
             }
 
             if (!node.getOrderBy().isEmpty()) {
                 builder.append(" ORDER BY ")
-                        .append(formatSortItems(node.getOrderBy()));
+                        .append(formatSortItems(node.getOrderBy(), parameters));
             }
 
             if (node.getLimit().isPresent()) {
@@ -664,12 +691,51 @@ public final class SqlFormatter
         protected Void visitDelete(Delete node, Integer context)
         {
             builder.append("DELETE FROM ")
-                    .append(node.getTable().getName());
+                    .append(formatName(node.getTable().getName()));
 
             if (node.getWhere().isPresent()) {
                 builder.append(" WHERE ")
-                        .append(formatExpression(node.getWhere().get()));
+                        .append(formatExpression(node.getWhere().get(), parameters));
             }
+
+            return null;
+        }
+
+        @Override
+        protected Void visitCreateSchema(CreateSchema node, Integer context)
+        {
+            builder.append("CREATE SCHEMA ");
+            if (node.isNotExists()) {
+                builder.append("IF NOT EXISTS ");
+            }
+            builder.append(formatName(node.getSchemaName()));
+
+            appendTableProperties(builder, node.getProperties());
+
+            return null;
+        }
+
+        @Override
+        protected Void visitDropSchema(DropSchema node, Integer context)
+        {
+            builder.append("DROP SCHEMA ");
+            if (node.isExists()) {
+                builder.append("IF EXISTS ");
+            }
+            builder.append(formatName(node.getSchemaName()))
+                    .append(" ")
+                    .append(node.isCascade() ? "CASCADE" : "RESTRICT");
+
+            return null;
+        }
+
+        @Override
+        protected Void visitRenameSchema(RenameSchema node, Integer context)
+        {
+            builder.append("ALTER SCHEMA ")
+                    .append(formatName(node.getSource()))
+                    .append(" RENAME TO ")
+                    .append(formatName(node.getTarget()));
 
             return null;
         }
@@ -681,14 +747,13 @@ public final class SqlFormatter
             if (node.isNotExists()) {
                 builder.append("IF NOT EXISTS ");
             }
-            builder.append(node.getName());
+            builder.append(formatName(node.getName()));
 
-            if (!node.getProperties().isEmpty()) {
-                builder.append(" WITH (");
-                Joiner.on(", ").appendTo(builder, transform(node.getProperties().entrySet(),
-                        entry -> entry.getKey() + " = " + formatExpression(entry.getValue())));
-                builder.append(")");
+            if (node.getComment().isPresent()) {
+                builder.append("\nCOMMENT " + formatStringLiteral(node.getComment().get()));
             }
+
+            appendTableProperties(builder, node.getProperties());
 
             builder.append(" AS ");
             process(node.getQuery(), indent);
@@ -710,23 +775,54 @@ public final class SqlFormatter
             String tableName = formatName(node.getName());
             builder.append(tableName).append(" (\n");
 
+            String elementIndent = indentString(indent + 1);
             String columnList = node.getElements().stream()
-                    .map(column -> INDENT + formatName(column.getName()) + " " + column.getType())
+                    .map(element -> {
+                        if (element instanceof ColumnDefinition) {
+                            ColumnDefinition column = (ColumnDefinition) element;
+                            return elementIndent + formatName(column.getName()) + " " + column.getType() +
+                                    column.getComment()
+                                            .map(comment -> " COMMENT " + formatStringLiteral(comment))
+                                            .orElse("");
+                        }
+                        if (element instanceof LikeClause) {
+                            LikeClause likeClause = (LikeClause) element;
+                            StringBuilder builder = new StringBuilder(elementIndent);
+                            builder.append("LIKE ")
+                                    .append(formatName(likeClause.getTableName()));
+                            if (likeClause.getPropertiesOption().isPresent()) {
+                                builder.append(" ")
+                                        .append(likeClause.getPropertiesOption().get().name())
+                                        .append(" PROPERTIES");
+                            }
+                            return builder.toString();
+                        }
+                        throw new UnsupportedOperationException("unknown table element: " + element);
+                    })
                     .collect(joining(",\n"));
             builder.append(columnList);
             builder.append("\n").append(")");
 
-            if (!node.getProperties().isEmpty()) {
+            if (node.getComment().isPresent()) {
+                builder.append("\nCOMMENT " + formatStringLiteral(node.getComment().get()));
+            }
+
+            appendTableProperties(builder, node.getProperties());
+
+            return null;
+        }
+
+        private void appendTableProperties(StringBuilder builder, Map<String, Expression> properties)
+        {
+            if (!properties.isEmpty()) {
                 builder.append("\nWITH (\n");
                 // Always output the table properties in sorted order
-                String propertyList = ImmutableSortedMap.copyOf(node.getProperties()).entrySet().stream()
-                        .map(entry -> INDENT + formatName(entry.getKey()) + " = " + entry.getValue())
+                String propertyList = ImmutableSortedMap.copyOf(properties).entrySet().stream()
+                        .map(entry -> INDENT + formatName(entry.getKey()) + " = " + formatExpression(entry.getValue(), parameters))
                         .collect(joining(",\n"));
                 builder.append(propertyList);
                 builder.append("\n").append(")");
             }
-
-            return null;
         }
 
         private static String formatName(String name)
@@ -817,7 +913,7 @@ public final class SqlFormatter
             builder.append("SET SESSION ")
                     .append(node.getName())
                     .append(" = ")
-                    .append(formatExpression(node.getValue()));
+                    .append(formatExpression(node.getValue(), parameters));
 
             return null;
         }
@@ -838,7 +934,7 @@ public final class SqlFormatter
                 builder.append(node.getName().get())
                         .append(" => ");
             }
-            builder.append(formatExpression(node.getValue()));
+            builder.append(formatExpression(node.getValue(), parameters));
 
             return null;
         }
@@ -974,6 +1070,23 @@ public final class SqlFormatter
             builder.append(node.getTableName())
                     .append(" FROM ")
                     .append(node.getGrantee());
+
+            return null;
+        }
+
+        @Override
+        public Void visitShowGrants(ShowGrants node, Integer indent)
+        {
+            builder.append("SHOW GRANTS ");
+
+            if (node.getTableName().isPresent()) {
+                builder.append("ON ");
+
+                if (node.getTable()) {
+                    builder.append("TABLE ");
+                }
+                builder.append(node.getTableName().get());
+            }
 
             return null;
         }

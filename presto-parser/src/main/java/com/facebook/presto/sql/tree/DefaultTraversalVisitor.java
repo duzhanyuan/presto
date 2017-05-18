@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.sql.tree;
 
+import java.util.Map.Entry;
 import java.util.Set;
 
 public abstract class DefaultTraversalVisitor<R, C>
@@ -103,8 +104,8 @@ public abstract class DefaultTraversalVisitor<R, C>
             process(node.getWith().get(), context);
         }
         process(node.getQueryBody(), context);
-        for (SortItem sortItem : node.getOrderBy()) {
-            process(sortItem, context);
+        if (node.getOrderBy().isPresent()) {
+            process(node.getOrderBy().get(), context);
         }
 
         return null;
@@ -173,6 +174,10 @@ public abstract class DefaultTraversalVisitor<R, C>
             process(node.getWindow().get(), context);
         }
 
+        if (node.getFilter().isPresent()) {
+            process(node.getFilter().get(), context);
+        }
+
         return null;
     }
 
@@ -190,8 +195,8 @@ public abstract class DefaultTraversalVisitor<R, C>
             process(expression, context);
         }
 
-        for (SortItem sortItem : node.getOrderBy()) {
-            process(sortItem.getSortKey(), context);
+        if (node.getOrderBy().isPresent()) {
+            process(node.getOrderBy().get(), context);
         }
 
         if (node.getFrame().isPresent()) {
@@ -275,6 +280,15 @@ public abstract class DefaultTraversalVisitor<R, C>
     }
 
     @Override
+    protected R visitBindExpression(BindExpression node, C context)
+    {
+        process(node.getValue(), context);
+        process(node.getFunction(), context);
+
+        return null;
+    }
+
+    @Override
     protected R visitArithmeticUnary(ArithmeticUnaryExpression node, C context)
     {
         return process(node.getValue(), context);
@@ -338,6 +352,15 @@ public abstract class DefaultTraversalVisitor<R, C>
     }
 
     @Override
+    protected R visitOrderBy(OrderBy node, C context)
+    {
+        for (SortItem sortItem : node.getSortItems()) {
+            process(sortItem, context);
+        }
+        return null;
+    }
+
+    @Override
     protected R visitSortItem(SortItem node, C context)
     {
         return process(node.getSortKey(), context);
@@ -359,8 +382,8 @@ public abstract class DefaultTraversalVisitor<R, C>
         if (node.getHaving().isPresent()) {
             process(node.getHaving().get(), context);
         }
-        for (SortItem sortItem : node.getOrderBy()) {
-            process(sortItem, context);
+        if (node.getOrderBy().isPresent()) {
+            process(node.getOrderBy().get(), context);
         }
         return null;
     }
@@ -409,11 +432,6 @@ public abstract class DefaultTraversalVisitor<R, C>
     {
         process(node.getRelation(), context);
         process(node.getSamplePercentage(), context);
-        if (node.getColumnsToStratifyOn().isPresent()) {
-            for (Expression expression : node.getColumnsToStratifyOn().get()) {
-                process(expression, context);
-            }
-        }
         return null;
     }
 
@@ -462,18 +480,6 @@ public abstract class DefaultTraversalVisitor<R, C>
     }
 
     @Override
-    protected R visitSimpleGroupBy(SimpleGroupBy node, C context)
-    {
-        visitGroupingElement(node, context);
-
-        for (Expression expression : node.getColumnExpressions()) {
-           process(expression, context);
-        }
-
-        return null;
-    }
-
-    @Override
     protected R visitInsert(Insert node, C context)
     {
         process(node.getQuery(), context);
@@ -495,6 +501,96 @@ public abstract class DefaultTraversalVisitor<R, C>
     {
         process(node.getQuery(), context);
         node.getProperties().values().forEach(expression -> process(expression, context));
+
+        return null;
+    }
+
+    @Override
+    protected R visitCreateView(CreateView node, C context)
+    {
+        process(node.getQuery(), context);
+
+        return null;
+    }
+
+    @Override
+    protected R visitSetSession(SetSession node, C context)
+    {
+        process(node.getValue(), context);
+
+        return null;
+    }
+
+    @Override
+    protected R visitAddColumn(AddColumn node, C context)
+    {
+        process(node.getColumn(), context);
+
+        return null;
+    }
+
+    @Override
+    protected R visitCreateTable(CreateTable node, C context)
+    {
+        for (TableElement tableElement : node.getElements()) {
+            process(tableElement, context);
+        }
+        for (Entry<String, Expression> entry : node.getProperties().entrySet()) {
+            process(entry.getValue(), context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected R visitShowPartitions(ShowPartitions node, C context)
+    {
+        if (node.getWhere().isPresent()) {
+            process(node.getWhere().get(), context);
+        }
+
+        for (SortItem sortItem : node.getOrderBy()) {
+            process(sortItem, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected R visitStartTransaction(StartTransaction node, C context)
+    {
+        for (TransactionMode transactionMode : node.getTransactionModes()) {
+            process(transactionMode, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected R visitExplain(Explain node, C context)
+    {
+        process(node.getStatement(), context);
+
+        for (ExplainOption option : node.getOptions()) {
+            process(option, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected R visitQuantifiedComparisonExpression(QuantifiedComparisonExpression node, C context)
+    {
+        process(node.getValue(), context);
+        process(node.getSubquery(), context);
+
+        return null;
+    }
+
+    @Override
+    protected R visitExists(ExistsPredicate node, C context)
+    {
+        process(node.getSubquery(), context);
 
         return null;
     }

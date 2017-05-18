@@ -30,7 +30,6 @@ import com.facebook.presto.sql.planner.plan.SortNode;
 import com.facebook.presto.sql.planner.plan.TopNNode;
 import com.facebook.presto.sql.planner.plan.UnionNode;
 import com.facebook.presto.sql.planner.plan.ValuesNode;
-import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableList;
 
 import java.util.ArrayList;
@@ -38,7 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
 
 public class LimitPushDown
@@ -80,7 +79,7 @@ public class LimitPushDown
         @Override
         public String toString()
         {
-            return MoreObjects.toStringHelper(this)
+            return toStringHelper(this)
                     .add("count", count)
                     .add("partial", partial)
                     .toString();
@@ -130,15 +129,15 @@ public class LimitPushDown
         }
 
         @Override
+        @Deprecated
         public PlanNode visitAggregation(AggregationNode node, RewriteContext<LimitContext> context)
         {
             LimitContext limit = context.get();
 
             if (limit != null &&
                     node.getAggregations().isEmpty() &&
-                    node.getOutputSymbols().size() == node.getGroupBy().size() &&
-                    node.getOutputSymbols().containsAll(node.getGroupBy())) {
-                checkArgument(!node.getSampleWeight().isPresent(), "DISTINCT aggregation has sample weight symbol");
+                    node.getOutputSymbols().size() == node.getGroupingKeys().size() &&
+                    node.getOutputSymbols().containsAll(node.getGroupingKeys())) {
                 PlanNode rewrittenSource = context.rewrite(node.getSource());
                 return new DistinctLimitNode(idAllocator.getNextId(), rewrittenSource, limit.getCount(), false, Optional.empty());
             }
@@ -180,17 +179,18 @@ public class LimitPushDown
             if (limit != null) {
                 count = Math.min(count, limit.getCount());
             }
-            return new TopNNode(node.getId(), rewrittenSource, count, node.getOrderBy(), node.getOrderings(), node.isPartial());
+            return new TopNNode(node.getId(), rewrittenSource, count, node.getOrderBy(), node.getOrderings(), node.getStep());
         }
 
         @Override
+        @Deprecated
         public PlanNode visitSort(SortNode node, RewriteContext<LimitContext> context)
         {
             LimitContext limit = context.get();
 
             PlanNode rewrittenSource = context.rewrite(node.getSource());
             if (limit != null) {
-                return new TopNNode(node.getId(), rewrittenSource, limit.getCount(), node.getOrderBy(), node.getOrderings(), false);
+                return new TopNNode(node.getId(), rewrittenSource, limit.getCount(), node.getOrderBy(), node.getOrderings(), TopNNode.Step.SINGLE);
             }
             else if (rewrittenSource != node.getSource()) {
                 return new SortNode(node.getId(), rewrittenSource, node.getOrderBy(), node.getOrderings());
@@ -225,7 +225,16 @@ public class LimitPushDown
         {
             PlanNode source = context.rewrite(node.getSource(), context.get());
             if (source != node.getSource()) {
-                return new SemiJoinNode(node.getId(), source, node.getFilteringSource(), node.getSourceJoinSymbol(), node.getFilteringSourceJoinSymbol(), node.getSemiJoinOutput(), node.getSourceHashSymbol(), node.getFilteringSourceHashSymbol());
+                return new SemiJoinNode(
+                        node.getId(),
+                        source,
+                        node.getFilteringSource(),
+                        node.getSourceJoinSymbol(),
+                        node.getFilteringSourceJoinSymbol(),
+                        node.getSemiJoinOutput(),
+                        node.getSourceHashSymbol(),
+                        node.getFilteringSourceHashSymbol(),
+                        node.getDistributionType());
             }
             return node;
         }

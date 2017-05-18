@@ -18,68 +18,143 @@
 var GLYPHICON_DEFAULT = {color: '#1edcff'};
 var GLYPHICON_HIGHLIGHT = {color: '#999999'};
 
-var QUERY_STATE_COLOR_MAP = {
+var STATE_COLOR_MAP = {
     QUEUED: '#1b8f72',
     RUNNING: '#19874e',
-    PLANNING: '#824b98',
+    PLANNING: '#674f98',
     FINISHED: '#1a4629',
-    BLOCKED: '#685b72',
-    USER_ERROR: '#a67559',
+    BLOCKED: '#61003b',
+    USER_ERROR: '#9a7d66',
     USER_CANCELED: '#858959',
     INSUFFICIENT_RESOURCES: '#7f5b72',
-    EXTERNAL_ERROR: '#caa55c',
+    EXTERNAL_ERROR: '#ca7640',
     UNKNOWN_ERROR: '#943524'
 };
 
-function getReadableErrorCode(errorType, errorCode)
+function getQueryStateColor(query)
 {
-    switch (errorType) {
-        case "USER_ERROR":
-            if (errorCode.name === 'USER_CANCELED') {
-                return "USER CANCELED";
-            }
-            return "USER ERROR";
-        case "INTERNAL_ERROR":
-            return "INTERNAL ERROR";
-        case "INSUFFICIENT_RESOURCES":
-            return "INSUFFICIENT RESOURCES";
-        case "EXTERNAL":
-            return "EXTERNAL ERROR";
-    }
-    return errorType;
-}
-
-function getQueryStateColor(state, errorType, errorCode)
-{
-    switch (state) {
+    switch (query.state) {
         case "QUEUED":
-            return QUERY_STATE_COLOR_MAP.QUEUED;
+            return STATE_COLOR_MAP.QUEUED;
         case "PLANNING":
-            return QUERY_STATE_COLOR_MAP.PLANNING;
+            return STATE_COLOR_MAP.PLANNING;
         case "STARTING":
-        case "RUNNING":
         case "FINISHING":
-            return QUERY_STATE_COLOR_MAP.RUNNING;
+        case "RUNNING":
+            if (query.queryStats && query.queryStats.fullyBlocked) {
+                return STATE_COLOR_MAP.BLOCKED;
+            }
+            return STATE_COLOR_MAP.RUNNING;
         case "FAILED":
-            switch (errorType) {
+            switch (query.errorType) {
                 case "USER_ERROR":
-                    if (errorCode.name === 'USER_CANCELED') {
-                        return QUERY_STATE_COLOR_MAP.USER_CANCELED;
+                    if (query.errorCode.name === 'USER_CANCELED') {
+                        return STATE_COLOR_MAP.USER_CANCELED;
                     }
-                    return QUERY_STATE_COLOR_MAP.USER_ERROR;
+                    return STATE_COLOR_MAP.USER_ERROR;
                 case "EXTERNAL":
-                    return QUERY_STATE_COLOR_MAP.EXTERNAL_ERROR;
+                    return STATE_COLOR_MAP.EXTERNAL_ERROR;
                 case "INSUFFICIENT_RESOURCES":
-                    return QUERY_STATE_COLOR_MAP.INSUFFICIENT_RESOURCES;
+                    return STATE_COLOR_MAP.INSUFFICIENT_RESOURCES;
                 default:
-                    return QUERY_STATE_COLOR_MAP.UNKNOWN_ERROR;
+                    return STATE_COLOR_MAP.UNKNOWN_ERROR;
             }
         case "FINISHED":
-            return QUERY_STATE_COLOR_MAP.FINISHED;
+            return STATE_COLOR_MAP.FINISHED;
         default:
-            return QUERY_STATE_COLOR_MAP.QUEUED;
+            return STATE_COLOR_MAP.QUEUED;
     }
-};
+}
+
+function getStageStateColor(stage)
+{
+    switch (stage.state) {
+        case "PLANNED":
+            return STATE_COLOR_MAP.QUEUED;
+        case "SCHEDULING":
+        case "SCHEDULING_SPLITS":
+        case "SCHEDULED":
+            return STATE_COLOR_MAP.PLANNING;
+        case "RUNNING":
+            if (stage.stageStats && stage.stageStats.fullyBlocked) {
+                return STATE_COLOR_MAP.BLOCKED;
+            }
+            return STATE_COLOR_MAP.RUNNING;
+        case "FINISHED":
+            return STATE_COLOR_MAP.FINISHED;
+        case "CANCELED":
+        case "ABORTED":
+        case "FAILED":
+            return STATE_COLOR_MAP.UNKNOWN_ERROR;
+        default:
+            return "#b5b5b5"
+    }
+}
+
+// This relies on the fact that BasicQueryInfo and QueryInfo have all the fields
+// necessary to compute this string, and that these fields are consistently named.
+function getHumanReadableState(query)
+{
+    if (query.state == "RUNNING") {
+        var title = "RUNNING";
+
+        if (query.scheduled && query.queryStats.totalDrivers > 0 && query.queryStats.runningDrivers >= 0) {
+            if (query.queryStats.fullyBlocked) {
+                title = "BLOCKED";
+
+                if (query.queryStats.blockedReasons && query.queryStats.blockedReasons.length > 0) {
+                    title += " (" + query.queryStats.blockedReasons.join(", ") + ")";
+                }
+            }
+
+            if (query.memoryPool === "reserved") {
+                title += " (RESERVED)"
+            }
+
+            return title;
+        }
+    }
+
+    if (query.state == "FAILED") {
+        switch (query.errorType) {
+            case "USER_ERROR":
+                if (query.errorCode.name === "USER_CANCELED") {
+                    return "USER CANCELED";
+                }
+                return "USER ERROR";
+            case "INTERNAL_ERROR":
+                return "INTERNAL ERROR";
+            case "INSUFFICIENT_RESOURCES":
+                return "INSUFFICIENT RESOURCES";
+            case "EXTERNAL":
+                return "EXTERNAL ERROR";
+        }
+    }
+
+    return query.state;
+}
+
+function getProgressBarPercentage(query)
+{
+    var progress = query.queryStats.progressPercentage;
+
+    // progress bars should appear 'full' when query progress is not meaningful
+    return !progress ? 100 : Math.round(progress);
+}
+
+function getProgressBarTitle(query)
+{
+    if (query.queryStats.progressPercentage && query.state === "RUNNING") {
+        return getHumanReadableState(query) + " (" + getProgressBarPercentage(query) + "%)"
+    }
+
+    return getHumanReadableState(query)
+}
+
+function isQueryComplete(query)
+{
+    return ["FINISHED", "FAILED", "CANCELED"].indexOf(query.state) > -1;
+}
 
 // Sparkline-related functions
 // ===========================
@@ -91,14 +166,14 @@ var MOVING_AVERAGE_ALPHA = 0.2;
 
 function addToHistory (value, valuesArray) {
     if (valuesArray.length == 0) {
-        return valuesArray.concat([value]);;
+        return valuesArray.concat([value]);
     }
     return valuesArray.concat([value]).slice(Math.max(valuesArray.length - MAX_HISTORY, 0));
 }
 
 function addExponentiallyWeightedToHistory (value, valuesArray) {
     if (valuesArray.length == 0) {
-        return valuesArray.concat([value]);;
+        return valuesArray.concat([value]);
     }
 
     var movingAverage = (value * MOVING_AVERAGE_ALPHA) + (valuesArray[valuesArray.length - 1] * (1 - MOVING_AVERAGE_ALPHA));
@@ -109,15 +184,92 @@ function addExponentiallyWeightedToHistory (value, valuesArray) {
     return valuesArray.concat([movingAverage]).slice(Math.max(valuesArray.length - MAX_HISTORY, 0));
 }
 
+// DagreD3 Graph-related functions
+// ===============================
+
+function initializeGraph()
+{
+    return new dagreD3.graphlib.Graph({compound: true})
+        .setGraph({rankdir: 'BT'})
+        .setDefaultEdgeLabel(function () { return {}; });
+}
+
+function initializeSvg(selector)
+{
+    const svg = d3.select(selector);
+    svg.append("g");
+
+    return svg;
+}
+
+function computeSources(nodeInfo)
+{
+    var sources = [];
+    var remoteSources = []; // TODO: put remoteSources in node-specific section
+    switch (nodeInfo['@type']) {
+        case 'output':
+        case 'explainAnalyze':
+        case 'project':
+        case 'filter':
+        case 'aggregation':
+        case 'sort':
+        case 'markDistinct':
+        case 'window':
+        case 'rowNumber':
+        case 'topnRowNumber':
+        case 'limit':
+        case 'distinctlimit':
+        case 'topn':
+        case 'sample':
+        case 'tablewriter':
+        case 'delete':
+        case 'metadatadelete':
+        case 'tablecommit':
+        case 'groupid':
+        case 'unnest':
+        case 'scalar':
+            sources = [nodeInfo.source];
+            break;
+        case 'join':
+            sources = [nodeInfo.left, nodeInfo.right];
+            break;
+        case 'semijoin':
+            sources = [nodeInfo.source, nodeInfo.filteringSource];
+            break;
+        case 'indexjoin':
+            sources = [nodeInfo.probeSource, nodeInfo.filterSource];
+            break;
+        case 'union':
+        case 'exchange':
+            sources = nodeInfo.sources;
+            break;
+        case 'remoteSource':
+            remoteSources = nodeInfo.sourceFragmentIds;
+            break;
+        case 'tablescan':
+        case 'values':
+        case 'indexsource':
+            break;
+        default:
+            console.log("NOTE: Unhandled PlanNode: " + nodeInfo['@type']);
+    }
+
+    return [sources, remoteSources];
+}
+
 // Utility functions
 // =================
 
 function truncateString(inputString, length) {
-    if (inputString.length > length) {
+    if (inputString && inputString.length > length) {
         return inputString.substring(0, length) + "...";
     }
 
     return inputString;
+}
+
+function getStageId(stageId) {
+    return stageId.slice(stageId.indexOf('.') + 1, stageId.length)
 }
 
 function getTaskIdSuffix(taskId) {
@@ -143,6 +295,15 @@ function getHostname(url) {
         hostname = hostname.substr(1, hostname.length - 2);
     }
     return hostname;
+}
+
+function getPort(url) {
+    return new URL(url).port;
+}
+
+function getHostAndPort(url) {
+    var url = new URL(url);
+    return url.hostname + ":" + url.port;
 }
 
 function computeRate(count, ms) {
@@ -227,23 +388,23 @@ function formatDataSizeMinUnit(size, minUnit) {
     }
     if (size >= 1024) {
         size /= 1024;
-        unit = "K";
+        unit = "K" + minUnit;
     }
     if (size >= 1024) {
         size /= 1024;
-        unit = "M";
+        unit = "M" + minUnit;
     }
     if (size >= 1024) {
         size /= 1024;
-        unit = "G";
+        unit = "G" + minUnit;
     }
     if (size >= 1024) {
         size /= 1024;
-        unit = "T";
+        unit = "T" + minUnit;
     }
     if (size >= 1024) {
         size /= 1024;
-        unit = "P";
+        unit = "P" + minUnit;
     }
     return precisionRound(size) + unit;
 }
@@ -359,4 +520,12 @@ function formatShortDateTime(date) {
     var month = "" + (date.getMonth() + 1);
     var dayOfMonth  = "" + date.getDate();
     return year + "-" + (month[1] ? month : "0" + month[0]) + "-" + (dayOfMonth[1] ? dayOfMonth: "0" + dayOfMonth[0]) + " " + formatShortTime(date);
+}
+
+function removeQueryId(id) {
+    var pos = id.indexOf('.');
+    if (pos != -1) {
+        return id.substring(pos + 1);
+    }
+    return id;
 }

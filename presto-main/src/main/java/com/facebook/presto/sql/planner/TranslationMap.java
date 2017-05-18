@@ -15,13 +15,18 @@ package com.facebook.presto.sql.planner;
 
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.analyzer.Analysis;
+import com.facebook.presto.sql.analyzer.ResolvedField;
 import com.facebook.presto.sql.tree.Cast;
 import com.facebook.presto.sql.tree.DereferenceExpression;
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.ExpressionRewriter;
 import com.facebook.presto.sql.tree.ExpressionTreeRewriter;
 import com.facebook.presto.sql.tree.FieldReference;
-import com.facebook.presto.sql.tree.QualifiedNameReference;
+import com.facebook.presto.sql.tree.Identifier;
+import com.facebook.presto.sql.tree.LambdaArgumentDeclaration;
+import com.facebook.presto.sql.tree.LambdaExpression;
+import com.facebook.presto.util.maps.IdentityLinkedHashMap;
+import com.google.common.collect.ImmutableList;
 
 import java.util.HashMap;
 import java.util.List;
@@ -30,6 +35,7 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
 
 /**
  * Keeps track of fields and expressions and their mapping to symbols in the current plan
@@ -39,6 +45,7 @@ class TranslationMap
     // all expressions are rewritten in terms of fields declared by this relation plan
     private final RelationPlan rewriteBase;
     private final Analysis analysis;
+    private final IdentityLinkedHashMap<LambdaArgumentDeclaration, Symbol> lambdaDeclarationToSymbolMap;
 
     // current mappings of underlying field -> symbol for translating direct field references
     private final Symbol[] fieldSymbols;
@@ -47,12 +54,13 @@ class TranslationMap
     private final Map<Expression, Symbol> expressionToSymbols = new HashMap<>();
     private final Map<Expression, Expression> expressionToExpressions = new HashMap<>();
 
-    public TranslationMap(RelationPlan rewriteBase, Analysis analysis)
+    public TranslationMap(RelationPlan rewriteBase, Analysis analysis, IdentityLinkedHashMap<LambdaArgumentDeclaration, Symbol> lambdaDeclarationToSymbolMap)
     {
-        this.rewriteBase = rewriteBase;
-        this.analysis = analysis;
+        this.rewriteBase = requireNonNull(rewriteBase, "rewriteBase is null");
+        this.analysis = requireNonNull(analysis, "analysis is null");
+        this.lambdaDeclarationToSymbolMap = requireNonNull(lambdaDeclarationToSymbolMap, "lambdaDeclarationToSymbolMap is null");
 
-        fieldSymbols = new Symbol[rewriteBase.getOutputSymbols().size()];
+        fieldSymbols = new Symbol[rewriteBase.getFieldMappings().size()];
     }
 
     public RelationPlan getRelationPlan()
@@ -63,6 +71,11 @@ class TranslationMap
     public Analysis getAnalysis()
     {
         return analysis;
+    }
+
+    public IdentityLinkedHashMap<LambdaArgumentDeclaration, Symbol> getLambdaDeclarationToSymbolMap()
+    {
+        return lambdaDeclarationToSymbolMap;
     }
 
     public void setFieldMappings(List<Symbol> symbols)
@@ -89,6 +102,7 @@ class TranslationMap
     public void putExpressionMappingsFrom(TranslationMap other)
     {
         expressionToSymbols.putAll(other.expressionToSymbols);
+        expressionToExpressions.putAll(other.expressionToExpressions);
     }
 
     public Expression rewrite(Expression expression)
@@ -106,7 +120,7 @@ class TranslationMap
                     return expressionToSymbols.get(node).toSymbolReference();
                 }
                 else if (expressionToExpressions.containsKey(node)) {
-                    Expression mapping = expressionToExpressions.get(node);
+                    Expression mapping = getMapping(node);
                     mapping = translateNamesToSymbols(mapping);
                     return treeRewriter.defaultRewrite(mapping, context);
                 }
@@ -115,6 +129,21 @@ class TranslationMap
                 }
             }
         }, mapped);
+    }
+
+    private Expression getMapping(Expression expression)
+    {
+        if (!expressionToExpressions.containsKey(expression)) {
+            return expression;
+        }
+
+        Expression mapped = expressionToExpressions.get(expression);
+        Expression translated = translateNamesToSymbols(mapped);
+        if (!translated.equals(expression) && expressionToExpressions.containsKey(translated)) {
+            mapped = getMapping(translated);
+        }
+
+        return mapped;
     }
 
     public void put(Expression expression, Symbol symbol)
@@ -130,7 +159,9 @@ class TranslationMap
         expressionToSymbols.put(translated, symbol);
 
         // also update the field mappings if this expression is a field reference
-        analysis.getFieldIndex(expression).ifPresent(index -> fieldSymbols[index] = symbol);
+        rewriteBase.getScope().tryResolveField(expression)
+                .filter(ResolvedField::isLocal)
+                .ifPresent(field -> fieldSymbols[field.getHierarchyFieldIndex()] = symbol);
     }
 
     public boolean containsSymbol(Expression expression)
@@ -153,13 +184,36 @@ class TranslationMap
         }
 
         Expression translated = translateNamesToSymbols(expression);
-        checkArgument(expressionToSymbols.containsKey(translated), "No mapping for expression: %s", expression);
+        if (!expressionToSymbols.containsKey(translated)) {
+            checkArgument(expressionToExpressions.containsKey(translated), "No mapping for expression: %s", expression);
+            return get(expressionToExpressions.get(translated));
+        }
+
         return expressionToSymbols.get(translated);
     }
 
     public void put(Expression expression, Expression rewritten)
     {
         expressionToExpressions.put(translateNamesToSymbols(expression), rewritten);
+    }
+
+    public void addIntermediateMapping(Expression expression, Expression rewritten)
+    {
+        if (rewritten.equals(expression)) {
+            return;
+        }
+
+        Expression translated = translateNamesToSymbols(expression);
+        if (expressionToExpressions.containsKey(translated)) {
+            Expression previousMapping = expressionToExpressions.get(translated);
+            if (!previousMapping.equals(rewritten)) {
+                put(expression, rewritten);
+                addIntermediateMapping(rewritten, previousMapping);
+            }
+        }
+        else {
+            put(expression, rewritten);
+        }
     }
 
     private Expression translateNamesToSymbols(Expression expression)
@@ -182,30 +236,52 @@ class TranslationMap
             }
 
             @Override
-            public Expression rewriteQualifiedNameReference(QualifiedNameReference node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+            public Expression rewriteIdentifier(Identifier node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
             {
-                return rewriteExpressionWithResolvedName(node);
+                LambdaArgumentDeclaration referencedLambdaArgumentDeclaration = analysis.getLambdaArgumentReference(node);
+                if (referencedLambdaArgumentDeclaration != null) {
+                    Symbol symbol = lambdaDeclarationToSymbolMap.get(referencedLambdaArgumentDeclaration);
+                    return coerceIfNecessary(node, symbol.toSymbolReference());
+                }
+                else {
+                    return rewriteExpressionWithResolvedName(node);
+                }
             }
 
             private Expression rewriteExpressionWithResolvedName(Expression node)
             {
-                Optional<Integer> fieldIndex = analysis.getFieldIndex(node);
-                checkState(fieldIndex.isPresent(), "No field mapping for node '%s'", node);
-
-                Symbol symbol = rewriteBase.getSymbol(fieldIndex.get());
-                checkState(symbol != null, "No symbol mapping for node '%s' (%s)", node, fieldIndex.get());
-                Expression rewrittenExpression = symbol.toSymbolReference();
-
-                return coerceIfNecessary(node, rewrittenExpression);
+                return getSymbol(rewriteBase, node)
+                        .map(symbol -> coerceIfNecessary(node, symbol.toSymbolReference()))
+                        .orElse(coerceIfNecessary(node, node));
             }
 
             @Override
             public Expression rewriteDereferenceExpression(DereferenceExpression node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
             {
-                if (analysis.getFieldIndex(node).isPresent()) {
-                    return rewriteExpressionWithResolvedName(node);
+                Optional<ResolvedField> resolvedField = rewriteBase.getScope().tryResolveField(node);
+                if (resolvedField.isPresent()) {
+                    if (resolvedField.get().isLocal()) {
+                        return getSymbol(rewriteBase, node)
+                                .map(symbol -> coerceIfNecessary(node, symbol.toSymbolReference()))
+                                .orElseThrow(() -> new IllegalStateException("No symbol mapping for node " + node));
+                    }
+                    // do not rewrite outer references, it will be handled in outer scope planner
+                    return node;
                 }
                 return rewriteExpression(node, context, treeRewriter);
+            }
+
+            @Override
+            public Expression rewriteLambdaExpression(LambdaExpression node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+            {
+                checkState(analysis.getCoercion(node) == null, "cannot coerce a lambda expression");
+
+                ImmutableList.Builder<LambdaArgumentDeclaration> newArguments = ImmutableList.builder();
+                for (LambdaArgumentDeclaration argument : node.getArguments()) {
+                    newArguments.add(new LambdaArgumentDeclaration(lambdaDeclarationToSymbolMap.get(argument).getName()));
+                }
+                Expression rewrittenBody = treeRewriter.rewrite(node.getBody(), null);
+                return new LambdaExpression(newArguments.build(), rewrittenBody);
             }
 
             private Expression coerceIfNecessary(Expression original, Expression rewritten)
@@ -220,6 +296,14 @@ class TranslationMap
                 }
                 return rewritten;
             }
-        }, expression);
+        }, expression, null);
+    }
+
+    Optional<Symbol> getSymbol(RelationPlan plan, Expression expression)
+    {
+        return plan.getScope()
+                .tryResolveField(expression)
+                .filter(ResolvedField::isLocal)
+                .map(field -> plan.getFieldMappings().get(field.getHierarchyFieldIndex()));
     }
 }

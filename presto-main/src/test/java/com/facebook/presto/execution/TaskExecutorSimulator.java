@@ -13,7 +13,8 @@
  */
 package com.facebook.presto.execution;
 
-import com.facebook.presto.execution.TaskExecutor.TaskHandle;
+import com.facebook.presto.execution.executor.TaskExecutor;
+import com.facebook.presto.execution.executor.TaskHandle;
 import com.google.common.base.Throwables;
 import com.google.common.base.Ticker;
 import com.google.common.collect.ArrayListMultimap;
@@ -209,7 +210,7 @@ public class TaskExecutorSimulator
         return executor.submit((Callable<Void>) () -> {
             int taskId = 0;
             while (!done.get()) {
-                SimulationTask task = new SimulationTask(taskExecutor, new TaskId(userId, "0", taskId++));
+                SimulationTask task = new SimulationTask(taskExecutor, new TaskId(userId, 0, taskId++));
                 task.schedule(splitsPerTask, executor, new Duration(0, MILLISECONDS)).get();
                 task.destroy();
 

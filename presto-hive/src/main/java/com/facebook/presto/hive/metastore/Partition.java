@@ -22,6 +22,7 @@ import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -104,9 +105,14 @@ public class Partition
         return new Builder();
     }
 
+    public static Builder builder(Partition partition)
+    {
+        return new Builder(partition);
+    }
+
     public static class Builder
     {
-        private final Storage.Builder storageBuilder = Storage.builder();
+        private final Storage.Builder storageBuilder;
         private String databaseName;
         private String tableName;
         private List<String> values;
@@ -115,6 +121,17 @@ public class Partition
 
         private Builder()
         {
+            this.storageBuilder = Storage.builder();
+        }
+
+        private Builder(Partition partition)
+        {
+            this.storageBuilder = Storage.builder(partition.getStorage());
+            this.databaseName = partition.getDatabaseName();
+            this.tableName = partition.getTableName();
+            this.values = partition.getValues();
+            this.columns = partition.getColumns();
+            this.parameters = partition.getParameters();
         }
 
         public Builder setDatabaseName(String databaseName)
@@ -138,6 +155,12 @@ public class Partition
         public Storage.Builder getStorageBuilder()
         {
             return storageBuilder;
+        }
+
+        public Builder withStorage(Consumer<Storage.Builder> consumer)
+        {
+            consumer.accept(storageBuilder);
+            return this;
         }
 
         public Builder setColumns(List<Column> columns)

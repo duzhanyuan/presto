@@ -13,12 +13,13 @@
  */
 package com.facebook.presto.hive.orc;
 
+import com.facebook.presto.hive.FileFormatDataSourceStats;
 import com.facebook.presto.hive.HdfsEnvironment;
 import com.facebook.presto.hive.HiveClientConfig;
 import com.facebook.presto.hive.HiveColumnHandle;
 import com.facebook.presto.hive.HivePageSourceFactory;
-import com.facebook.presto.hive.HivePartitionKey;
 import com.facebook.presto.orc.OrcDataSource;
+import com.facebook.presto.orc.OrcDataSourceId;
 import com.facebook.presto.orc.OrcPredicate;
 import com.facebook.presto.orc.OrcReader;
 import com.facebook.presto.orc.OrcRecordReader;
@@ -53,12 +54,14 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.regex.Pattern;
 
+import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_CANNOT_OPEN_SPLIT;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_FILE_MISSING_COLUMN_NAMES;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_MISSING_DATA;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcMaxBufferSize;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcMaxMergeDistance;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcStreamBufferSize;
+import static com.facebook.presto.hive.HiveSessionProperties.isOrcBloomFiltersEnabled;
 import static com.facebook.presto.hive.HiveUtil.isDeserializerClass;
 import static com.google.common.base.Strings.nullToEmpty;
 import static java.lang.String.format;
@@ -71,18 +74,20 @@ public class OrcPageSourceFactory
     private final TypeManager typeManager;
     private final boolean useOrcColumnNames;
     private final HdfsEnvironment hdfsEnvironment;
+    private final FileFormatDataSourceStats stats;
 
     @Inject
-    public OrcPageSourceFactory(TypeManager typeManager, HiveClientConfig config, HdfsEnvironment hdfsEnvironment)
+    public OrcPageSourceFactory(TypeManager typeManager, HiveClientConfig config, HdfsEnvironment hdfsEnvironment, FileFormatDataSourceStats stats)
     {
-        this(typeManager, requireNonNull(config, "hiveClientConfig is null").isUseOrcColumnNames(), hdfsEnvironment);
+        this(typeManager, requireNonNull(config, "hiveClientConfig is null").isUseOrcColumnNames(), hdfsEnvironment, stats);
     }
 
-    public OrcPageSourceFactory(TypeManager typeManager, boolean useOrcColumnNames, HdfsEnvironment hdfsEnvironment)
+    public OrcPageSourceFactory(TypeManager typeManager, boolean useOrcColumnNames, HdfsEnvironment hdfsEnvironment, FileFormatDataSourceStats stats)
     {
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.useOrcColumnNames = useOrcColumnNames;
         this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
+        this.stats = requireNonNull(stats, "stats is null");
     }
 
     @Override
@@ -94,7 +99,6 @@ public class OrcPageSourceFactory
             long length,
             Properties schema,
             List<HiveColumnHandle> columns,
-            List<HivePartitionKey> partitionKeys,
             TupleDomain<HiveColumnHandle> effectivePredicate,
             DateTimeZone hiveStorageTimeZone)
     {
@@ -111,14 +115,15 @@ public class OrcPageSourceFactory
                 start,
                 length,
                 columns,
-                partitionKeys,
                 useOrcColumnNames,
                 effectivePredicate,
                 hiveStorageTimeZone,
                 typeManager,
                 getOrcMaxMergeDistance(session),
                 getOrcMaxBufferSize(session),
-                getOrcStreamBufferSize(session)));
+                getOrcStreamBufferSize(session),
+                isOrcBloomFiltersEnabled(session),
+                stats));
     }
 
     public static OrcPageSource createOrcPageSource(
@@ -130,21 +135,22 @@ public class OrcPageSourceFactory
             long start,
             long length,
             List<HiveColumnHandle> columns,
-            List<HivePartitionKey> partitionKeys,
             boolean useOrcColumnNames,
             TupleDomain<HiveColumnHandle> effectivePredicate,
             DateTimeZone hiveStorageTimeZone,
             TypeManager typeManager,
             DataSize maxMergeDistance,
             DataSize maxBufferSize,
-            DataSize streamBufferSize)
+            DataSize streamBufferSize,
+            boolean orcBloomFiltersEnabled,
+            FileFormatDataSourceStats stats)
     {
         OrcDataSource orcDataSource;
         try {
             FileSystem fileSystem = hdfsEnvironment.getFileSystem(sessionUser, path, configuration);
             long size = fileSystem.getFileStatus(path).getLen();
             FSDataInputStream inputStream = fileSystem.open(path);
-            orcDataSource = new HdfsOrcDataSource(path.toString(), size, maxMergeDistance, maxBufferSize, streamBufferSize, inputStream);
+            orcDataSource = new HdfsOrcDataSource(new OrcDataSourceId(path.toString()), size, maxMergeDistance, maxBufferSize, streamBufferSize, inputStream, stats);
         }
         catch (Exception e) {
             if (nullToEmpty(e.getMessage()).trim().equals("Filesystem closed") ||
@@ -162,14 +168,14 @@ public class OrcPageSourceFactory
             ImmutableMap.Builder<Integer, Type> includedColumns = ImmutableMap.builder();
             ImmutableList.Builder<ColumnReference<HiveColumnHandle>> columnReferences = ImmutableList.builder();
             for (HiveColumnHandle column : physicalColumns) {
-                if (!column.isPartitionKey()) {
+                if (column.getColumnType() == REGULAR) {
                     Type type = typeManager.getType(column.getTypeSignature());
                     includedColumns.put(column.getHiveColumnIndex(), type);
                     columnReferences.add(new ColumnReference<>(column, column.getHiveColumnIndex(), type));
                 }
             }
 
-            OrcPredicate predicate = new TupleDomainOrcPredicate<>(effectivePredicate, columnReferences.build());
+            OrcPredicate predicate = new TupleDomainOrcPredicate<>(effectivePredicate, columnReferences.build(), orcBloomFiltersEnabled);
 
             OrcRecordReader recordReader = reader.createRecordReader(
                     includedColumns.build(),
@@ -182,9 +188,7 @@ public class OrcPageSourceFactory
             return new OrcPageSource(
                     recordReader,
                     orcDataSource,
-                    partitionKeys,
                     physicalColumns,
-                    hiveStorageTimeZone,
                     typeManager,
                     systemMemoryUsage);
         }
@@ -230,7 +234,7 @@ public class OrcPageSourceFactory
                 physicalOrdinal = nextMissingColumnIndex;
                 nextMissingColumnIndex++;
             }
-            physicalColumns.add(new HiveColumnHandle(column.getClientId(), column.getName(), column.getHiveType(), column.getTypeSignature(), physicalOrdinal, column.isPartitionKey()));
+            physicalColumns.add(new HiveColumnHandle(column.getClientId(), column.getName(), column.getHiveType(), column.getTypeSignature(), physicalOrdinal, column.getColumnType(), column.getComment()));
         }
         return physicalColumns.build();
     }

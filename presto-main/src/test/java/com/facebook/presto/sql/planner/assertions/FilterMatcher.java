@@ -11,16 +11,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.facebook.presto.sql.planner.assertions;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.cost.PlanNodeCost;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.sql.planner.plan.FilterNode;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.tree.Expression;
-import com.google.common.base.MoreObjects;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
 
 final class FilterMatcher
@@ -34,21 +35,25 @@ final class FilterMatcher
     }
 
     @Override
-    public boolean matches(PlanNode node, Session session, Metadata metadata, SymbolAliases symbolAliases)
+    public boolean shapeMatches(PlanNode node)
     {
-        if (node instanceof FilterNode) {
-            FilterNode filterNode = (FilterNode) node;
-            if (new ExpressionVerifier(symbolAliases).process(filterNode.getPredicate(), predicate)) {
-                return true;
-            }
-        }
-        return false;
+        return node instanceof FilterNode;
+    }
+
+    @Override
+    public MatchResult detailMatches(PlanNode node, PlanNodeCost cost, Session session, Metadata metadata, SymbolAliases symbolAliases)
+    {
+        checkState(shapeMatches(node), "Plan testing framework error: shapeMatches returned false in detailMatches in %s", this.getClass().getName());
+
+        FilterNode filterNode = (FilterNode) node;
+        ExpressionVerifier verifier = new ExpressionVerifier(symbolAliases);
+        return new MatchResult(verifier.process(filterNode.getPredicate(), predicate));
     }
 
     @Override
     public String toString()
     {
-        return MoreObjects.toStringHelper(this)
+        return toStringHelper(this)
                 .add("predicate", predicate)
                 .toString();
     }

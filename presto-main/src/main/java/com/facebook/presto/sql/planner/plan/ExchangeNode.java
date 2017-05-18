@@ -31,7 +31,6 @@ import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_HAS
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.LOCAL;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.REMOTE;
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableList;
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
@@ -79,6 +78,7 @@ public class ExchangeNode
         requireNonNull(partitioningScheme, "partitioningScheme is null");
         requireNonNull(inputs, "inputs is null");
 
+        checkArgument(!inputs.isEmpty(), "inputs is empty");
         checkArgument(inputs.stream().allMatch(inputSymbols -> inputSymbols.size() == partitioningScheme.getOutputLayout().size()), "Input symbols do not match output symbols");
         checkArgument(inputs.size() == sources.size(), "Must have same number of input lists as sources");
         for (int i = 0; i < inputs.size(); i++) {
@@ -88,7 +88,7 @@ public class ExchangeNode
         checkArgument(scope != LOCAL || partitioningScheme.getPartitioning().getArguments().stream().allMatch(ArgumentBinding::isVariable),
                 "local exchanges do not support constant partition function arguments");
 
-        checkArgument(scope != REMOTE || type == Type.REPARTITION || !partitioningScheme.isReplicateNulls(), "Only REPARTITION can remotely replicate nulls");
+        checkArgument(scope != REMOTE || type == Type.REPARTITION || !partitioningScheme.isReplicateNullsAndAny(), "Only REPARTITION can replicate remotely");
 
         this.type = type;
         this.sources = sources;
@@ -102,7 +102,7 @@ public class ExchangeNode
         return partitionedExchange(id, scope, child, partitioningColumns, hashColumns, false);
     }
 
-    public static ExchangeNode partitionedExchange(PlanNodeId id, Scope scope, PlanNode child, List<Symbol> partitioningColumns, Optional<Symbol> hashColumns, boolean nullsReplicated)
+    public static ExchangeNode partitionedExchange(PlanNodeId id, Scope scope, PlanNode child, List<Symbol> partitioningColumns, Optional<Symbol> hashColumns, boolean replicateNullsAndAny)
     {
         return partitionedExchange(
                 id,
@@ -112,7 +112,7 @@ public class ExchangeNode
                         Partitioning.create(FIXED_HASH_DISTRIBUTION, partitioningColumns),
                         child.getOutputSymbols(),
                         hashColumns,
-                        nullsReplicated,
+                        replicateNullsAndAny,
                         Optional.empty()));
     }
 
@@ -127,7 +127,7 @@ public class ExchangeNode
                 scope,
                 partitioningScheme,
                 ImmutableList.of(child),
-                ImmutableList.of(child.getOutputSymbols()));
+                ImmutableList.of(partitioningScheme.getOutputLayout()));
     }
 
     public static ExchangeNode replicatedExchange(PlanNodeId id, Scope scope, PlanNode child)
@@ -150,19 +150,6 @@ public class ExchangeNode
                 new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), child.getOutputSymbols()),
                 ImmutableList.of(child),
                 ImmutableList.of(child.getOutputSymbols()));
-    }
-
-    public static ExchangeNode gatheringExchange(PlanNodeId id, Scope scope, List<Symbol> outputLayout, List<PlanNode> children)
-    {
-        return new ExchangeNode(
-                id,
-                ExchangeNode.Type.GATHER,
-                scope,
-                new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), outputLayout),
-                children,
-                children.stream()
-                        .map(PlanNode::getOutputSymbols)
-                        .collect(toImmutableList()));
     }
 
     @JsonProperty
@@ -206,5 +193,11 @@ public class ExchangeNode
     public <C, R> R accept(PlanVisitor<C, R> visitor, C context)
     {
         return visitor.visitExchange(this, context);
+    }
+
+    @Override
+    public PlanNode replaceChildren(List<PlanNode> newChildren)
+    {
+        return new ExchangeNode(getId(), type, scope, partitioningScheme, newChildren, inputs);
     }
 }

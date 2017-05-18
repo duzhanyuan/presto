@@ -15,8 +15,8 @@ package com.facebook.presto.sql.planner;
 
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.FunctionCall;
+import com.facebook.presto.sql.tree.Identifier;
 import com.facebook.presto.sql.tree.QualifiedName;
-import com.facebook.presto.sql.tree.QualifiedNameReference;
 import org.testng.annotations.Test;
 
 import java.util.Arrays;
@@ -32,6 +32,7 @@ public class TestDeterminismEvaluator
     {
         assertFalse(DeterminismEvaluator.isDeterministic(function("rand")));
         assertFalse(DeterminismEvaluator.isDeterministic(function("random")));
+        assertFalse(DeterminismEvaluator.isDeterministic(function("shuffle")));
         assertTrue(DeterminismEvaluator.isDeterministic(function("abs", input("symbol"))));
         assertFalse(DeterminismEvaluator.isDeterministic(function("abs", function("rand"))));
         assertTrue(DeterminismEvaluator.isDeterministic(function("abs", function("abs", input("symbol")))));
@@ -42,8 +43,8 @@ public class TestDeterminismEvaluator
         return new FunctionCall(QualifiedName.of(name), Arrays.asList(inputs));
     }
 
-    private static QualifiedNameReference input(String symbol)
+    private static Identifier input(String symbol)
     {
-        return new QualifiedNameReference(QualifiedName.of(symbol));
+        return new Identifier(symbol);
     }
 }

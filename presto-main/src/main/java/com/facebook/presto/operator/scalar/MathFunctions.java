@@ -13,24 +13,45 @@
  */
 package com.facebook.presto.operator.scalar;
 
+import com.facebook.presto.metadata.Signature;
+import com.facebook.presto.metadata.SqlScalarFunction;
 import com.facebook.presto.operator.aggregation.TypedSet;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.function.Description;
+import com.facebook.presto.spi.function.LiteralParameters;
 import com.facebook.presto.spi.function.ScalarFunction;
+import com.facebook.presto.spi.function.SqlNullable;
 import com.facebook.presto.spi.function.SqlType;
+import com.facebook.presto.spi.type.Decimals;
 import com.facebook.presto.spi.type.StandardTypes;
+import com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic;
+import com.facebook.presto.type.Constraint;
+import com.facebook.presto.type.LiteralParameter;
 import com.google.common.primitives.Doubles;
 import io.airlift.slice.Slice;
 
-import javax.annotation.Nullable;
-
+import java.math.BigInteger;
 import java.util.concurrent.ThreadLocalRandom;
 
+import static com.facebook.presto.metadata.FunctionKind.SCALAR;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static com.facebook.presto.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
+import static com.facebook.presto.spi.type.Decimals.longTenToNth;
 import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.add;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.isNegative;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.isZero;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.negate;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.rescale;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.rescaleTruncate;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.subtract;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.throwIfOverflows;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.unscaledDecimal;
+import static com.facebook.presto.spi.type.UnscaledDecimal128Arithmetic.unscaledDecimalToUnscaledLong;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
+import static com.facebook.presto.type.DecimalOperators.modulusScalarFunction;
+import static com.facebook.presto.type.DecimalOperators.modulusSignatureBuilder;
 import static com.facebook.presto.util.Failures.checkCondition;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.lang.Character.MAX_RADIX;
@@ -41,6 +62,29 @@ import static java.lang.String.format;
 
 public final class MathFunctions
 {
+    public static final SqlScalarFunction DECIMAL_MOD_FUNCTION = decimalModFunction();
+
+    private static final Slice[] DECIMAL_HALF_UNSCALED_FOR_SCALE;
+    private static final Slice[] DECIMAL_ALMOST_HALF_UNSCALED_FOR_SCALE;
+
+    static {
+        DECIMAL_HALF_UNSCALED_FOR_SCALE = new Slice[Decimals.MAX_PRECISION];
+        DECIMAL_ALMOST_HALF_UNSCALED_FOR_SCALE = new Slice[Decimals.MAX_PRECISION];
+        DECIMAL_HALF_UNSCALED_FOR_SCALE[0] = UnscaledDecimal128Arithmetic.unscaledDecimal(0);
+        DECIMAL_ALMOST_HALF_UNSCALED_FOR_SCALE[0] = UnscaledDecimal128Arithmetic.unscaledDecimal(0);
+        for (int scale = 1; scale < Decimals.MAX_PRECISION; ++scale) {
+            DECIMAL_HALF_UNSCALED_FOR_SCALE[scale] = UnscaledDecimal128Arithmetic.unscaledDecimal(
+                    BigInteger.TEN
+                            .pow(scale)
+                            .divide(BigInteger.valueOf(2)));
+            DECIMAL_ALMOST_HALF_UNSCALED_FOR_SCALE[scale] = UnscaledDecimal128Arithmetic.unscaledDecimal(
+                    BigInteger.TEN
+                            .pow(scale)
+                            .divide(BigInteger.valueOf(2))
+                            .subtract(BigInteger.ONE));
+        }
+    }
+
     private MathFunctions() {}
 
     @Description("absolute value")
@@ -87,10 +131,38 @@ public final class MathFunctions
         return Math.abs(num);
     }
 
+    @ScalarFunction("abs")
+    @Description("absolute value")
+    public static final class Abs
+    {
+        private Abs() {}
+
+        @LiteralParameters({"p", "s"})
+        @SqlType("decimal(p, s)")
+        public static long absShort(@SqlType("decimal(p, s)") long arg)
+        {
+            return arg > 0 ? arg : -arg;
+        }
+
+        @LiteralParameters({"p", "s"})
+        @SqlType("decimal(p, s)")
+        public static Slice absLong(@SqlType("decimal(p, s)") Slice arg)
+        {
+            if (isNegative(arg)) {
+                Slice result = unscaledDecimal(arg);
+                negate(result);
+                return result;
+            }
+            else {
+                return arg;
+            }
+        }
+    }
+
     @Description("absolute value")
     @ScalarFunction("abs")
-    @SqlType(StandardTypes.FLOAT)
-    public static long absFloat(@SqlType(StandardTypes.FLOAT) long num)
+    @SqlType(StandardTypes.REAL)
+    public static long absFloat(@SqlType(StandardTypes.REAL) long num)
     {
         return floatToRawIntBits(Math.abs(intBitsToFloat((int) num)));
     }
@@ -177,10 +249,50 @@ public final class MathFunctions
 
     @Description("round up to nearest integer")
     @ScalarFunction(value = "ceiling", alias = "ceil")
-    @SqlType(StandardTypes.FLOAT)
-    public static long ceilingFloat(@SqlType(StandardTypes.FLOAT) long num)
+    @SqlType(StandardTypes.REAL)
+    public static long ceilingFloat(@SqlType(StandardTypes.REAL) long num)
     {
         return floatToRawIntBits((float) ceiling(intBitsToFloat((int) num)));
+    }
+
+    @ScalarFunction(value = "ceiling", alias = "ceil")
+    @Description("round up to nearest integer")
+    public static final class Ceiling
+    {
+        private Ceiling() {}
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp,0)")
+        @Constraint(variable = "rp", expression = "p - s + min(s, 1)")
+        public static long ceilingShort(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") long num)
+        {
+            long rescaleFactor = Decimals.longTenToNth(numScale.intValue());
+            long increment = (num % rescaleFactor > 0) ? 1 : 0;
+            return num / rescaleFactor + increment;
+        }
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp,0)")
+        @Constraint(variable = "rp", expression = "p - s + min(s, 1)")
+        public static Slice ceilingLong(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") Slice num)
+        {
+            Slice tmp;
+            if (isNegative(num)) {
+                tmp = add(num, DECIMAL_HALF_UNSCALED_FOR_SCALE[numScale.intValue()]);
+            }
+            else {
+                tmp = add(num, DECIMAL_ALMOST_HALF_UNSCALED_FOR_SCALE[numScale.intValue()]);
+            }
+            return rescale(tmp, -numScale.intValue());
+        }
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp,0)")
+        @Constraint(variable = "rp", expression = "p - s + min(s, 1)")
+        public static long ceilingLongShort(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") Slice num)
+        {
+            return unscaledDecimalToUnscaledLong(ceilingLong(numScale, num));
+        }
     }
 
     @Description("round to integer by dropping digits after decimal point")
@@ -193,8 +305,8 @@ public final class MathFunctions
 
     @Description("round to integer by dropping digits after decimal point")
     @ScalarFunction
-    @SqlType(StandardTypes.FLOAT)
-    public static long truncate(@SqlType(StandardTypes.FLOAT) long num)
+    @SqlType(StandardTypes.REAL)
+    public static long truncate(@SqlType(StandardTypes.REAL) long num)
     {
         float numInFloat = intBitsToFloat((int) num);
         return floatToRawIntBits((float) (Math.signum(numInFloat) * Math.floor(Math.abs(numInFloat))));
@@ -280,10 +392,53 @@ public final class MathFunctions
         return Math.floor(num);
     }
 
+    @ScalarFunction(value = "floor")
+    @Description("round down to nearest integer")
+    public static final class Floor
+    {
+        private Floor() {}
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp,0)")
+        @Constraint(variable = "rp", expression = "p - s + min(s, 1)")
+        public static long floorShort(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") long num)
+        {
+            long rescaleFactor = Decimals.longTenToNth(numScale.intValue());
+            long increment = (num % rescaleFactor) < 0 ? -1 : 0;
+            return num / rescaleFactor + increment;
+        }
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp,0)")
+        @Constraint(variable = "rp", expression = "p - s + min(s, 1)")
+        public static Slice floorLong(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") Slice num)
+        {
+            Slice tmp;
+            if (isZero(num)) {
+                return num;
+            }
+            if (isNegative(num)) {
+                tmp = subtract(num, DECIMAL_ALMOST_HALF_UNSCALED_FOR_SCALE[numScale.intValue()]);
+            }
+            else {
+                tmp = subtract(num, DECIMAL_HALF_UNSCALED_FOR_SCALE[numScale.intValue()]);
+            }
+            return rescale(tmp, -numScale.intValue());
+        }
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp,0)")
+        @Constraint(variable = "rp", expression = "p - s + min(s, 1)")
+        public static long floorLongShort(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") Slice num)
+        {
+            return unscaledDecimalToUnscaledLong(floorLong(numScale, num));
+        }
+    }
+
     @Description("round down to nearest integer")
     @ScalarFunction("floor")
-    @SqlType(StandardTypes.FLOAT)
-    public static long floorFloat(@SqlType(StandardTypes.FLOAT) long num)
+    @SqlType(StandardTypes.REAL)
+    public static long floorFloat(@SqlType(StandardTypes.REAL) long num)
     {
         return floatToRawIntBits((float) floor(intBitsToFloat((int) num)));
     }
@@ -360,10 +515,19 @@ public final class MathFunctions
         return num1 % num2;
     }
 
+    private static SqlScalarFunction decimalModFunction()
+    {
+        Signature signature = modulusSignatureBuilder()
+                .kind(SCALAR)
+                .name("mod")
+                .build();
+        return modulusScalarFunction(signature);
+    }
+
     @Description("remainder of given quotient")
     @ScalarFunction("mod")
-    @SqlType(StandardTypes.FLOAT)
-    public static long modFloat(@SqlType(StandardTypes.FLOAT) long num1, @SqlType(StandardTypes.FLOAT) long num2)
+    @SqlType(StandardTypes.REAL)
+    public static long modFloat(@SqlType(StandardTypes.REAL) long num1, @SqlType(StandardTypes.REAL) long num2)
     {
         return floatToRawIntBits(intBitsToFloat((int) num1) % intBitsToFloat((int) num2));
     }
@@ -510,8 +674,8 @@ public final class MathFunctions
 
     @Description("round to given number of decimal places")
     @ScalarFunction("round")
-    @SqlType(StandardTypes.FLOAT)
-    public static long roundFloat(@SqlType(StandardTypes.FLOAT) long num)
+    @SqlType(StandardTypes.REAL)
+    public static long roundFloat(@SqlType(StandardTypes.REAL) long num)
     {
         return roundFloat(num, 0);
     }
@@ -533,10 +697,216 @@ public final class MathFunctions
         return Math.round(num * factor) / factor;
     }
 
+    @ScalarFunction("round")
+    @Description("round to nearest integer")
+    public static final class Round
+    {
+        private Round() {}
+
+        @LiteralParameters({"p", "s", "rp", "rs"})
+        @SqlType("decimal(rp, rs)")
+        @Constraint(variable = "rp", expression = "min(38, p - s + min(1, s))")
+        @Constraint(variable = "rs", expression = "0")
+        public static long roundShort(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") long num)
+        {
+            if (num == 0) {
+                return 0;
+            }
+            if (numScale == 0) {
+                return num;
+            }
+            if (num < 0) {
+                return -roundShort(numScale, -num);
+            }
+
+            long rescaleFactor = Decimals.longTenToNth(numScale.intValue());
+            long remainder = num % rescaleFactor;
+            long remainderBoundary = rescaleFactor / 2;
+            int roundUp = remainder >= remainderBoundary ? 1 : 0;
+            return num / rescaleFactor + roundUp;
+        }
+
+        @LiteralParameters({"p", "s", "rp", "rs"})
+        @SqlType("decimal(rp, rs)")
+        @Constraint(variable = "rp", expression = "min(38, p - s + min(1, s))")
+        @Constraint(variable = "rs", expression = "0")
+        public static Slice roundLongLong(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") Slice num)
+        {
+            if (numScale == 0) {
+                return num;
+            }
+            return rescale(num, -numScale.intValue());
+        }
+
+        @LiteralParameters({"p", "s", "rp", "rs"})
+        @SqlType("decimal(rp, rs)")
+        @Constraint(variable = "rp", expression = "min(38, p - s + min(1, s))")
+        @Constraint(variable = "rs", expression = "0")
+        public static long roundLongShort(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") Slice num)
+        {
+            return unscaledDecimalToUnscaledLong(rescale(num, -numScale.intValue()));
+        }
+    }
+
+    @ScalarFunction("round")
+    @Description("round to given number of decimal places")
+    public static final class RoundN
+    {
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp, s)")
+        @Constraint(variable = "rp", expression = "min(38, p + min(s, 1))")
+        public static long roundNShort(
+                @LiteralParameter("p") Long numPrecision,
+                @LiteralParameter("s") Long numScale,
+                @SqlType("decimal(p, s)") long num,
+                @SqlType(StandardTypes.BIGINT) long decimals)
+        {
+            if (num == 0 || numPrecision - numScale + decimals <= 0) {
+                return 0;
+            }
+            if (decimals >= numScale) {
+                return num;
+            }
+            if (num < 0) {
+                return -roundNShort(numPrecision, numScale, -num, decimals);
+            }
+
+            long rescaleFactor = longTenToNth((int) (numScale - decimals));
+            long remainder = num % rescaleFactor;
+            int roundUp = (remainder >= rescaleFactor / 2) ? 1 : 0;
+            return (num / rescaleFactor + roundUp) * rescaleFactor;
+        }
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp, s)")
+        @Constraint(variable = "rp", expression = "min(38, p + min(s, 1))")
+        public static Slice roundNLong(
+                @LiteralParameter("s") Long numScale,
+                @LiteralParameter("rp") Long resultPrecision,
+                @SqlType("decimal(p, s)") Slice num,
+                @SqlType(StandardTypes.BIGINT) long decimals)
+
+        {
+            if (numScale == 0) {
+                return num;
+            }
+            if (decimals >= numScale) {
+                return num;
+            }
+            int rescaleFactor = numScale.intValue() - (int) decimals;
+            try {
+                Slice result = rescale(rescale(num, -rescaleFactor), rescaleFactor);
+                throwIfOverflows(result, resultPrecision.intValue());
+                return result;
+            }
+            catch (ArithmeticException e) {
+                throw new PrestoException(NUMERIC_VALUE_OUT_OF_RANGE, "decimal overflow: " + num, e);
+            }
+        }
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp, s)")
+        @Constraint(variable = "rp", expression = "min(38, p + min(s, 1))")
+        public static Slice roundNShortLong(
+                @LiteralParameter("s") Long numScale,
+                @LiteralParameter("rp") Long resultPrecision,
+                @SqlType("decimal(p, s)") long num,
+                @SqlType(StandardTypes.BIGINT) long decimals)
+
+        {
+            return roundNLong(numScale, resultPrecision, unscaledDecimal(num), decimals);
+        }
+    }
+
+    @ScalarFunction("truncate")
+    @Description("round to integer by dropping digits after decimal point")
+    public static final class Truncate
+    {
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp,0)")
+        @Constraint(variable = "rp", expression = "max(1, p - s)")
+        public static long truncateShort(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") long num)
+        {
+            if (num == 0) {
+                return 0;
+            }
+            if (numScale == 0) {
+                return num;
+            }
+
+            long rescaleFactor = Decimals.longTenToNth(numScale.intValue());
+            return num / rescaleFactor;
+        }
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp,0)")
+        @Constraint(variable = "rp", expression = "max(1, p - s)")
+        public static Slice truncateLong(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") Slice num)
+        {
+            if (numScale == 0) {
+                return num;
+            }
+            return rescaleTruncate(num, -numScale.intValue());
+        }
+
+        @LiteralParameters({"p", "s", "rp"})
+        @SqlType("decimal(rp,0)")
+        @Constraint(variable = "rp", expression = "max(1, p - s)")
+        public static long truncateLongShort(@LiteralParameter("s") Long numScale, @SqlType("decimal(p, s)") Slice num)
+        {
+            return unscaledDecimalToUnscaledLong(rescaleTruncate(num, -numScale.intValue()));
+        }
+    }
+
+    @ScalarFunction("truncate")
+    @Description("round to integer by dropping given number of digits after decimal point")
+    public static final class TruncateN
+    {
+        private TruncateN() {}
+
+        @LiteralParameters({"p", "s"})
+        @SqlType("decimal(p, s)")
+        public static long truncateShort(
+                @LiteralParameter("p") Long numPrecision,
+                @LiteralParameter("s") Long numScale,
+                @SqlType("decimal(p, s)") long num,
+                @SqlType(StandardTypes.BIGINT) long roundScale)
+        {
+            if (num == 0 || numPrecision - numScale + roundScale <= 0) {
+                return 0;
+            }
+            if (roundScale >= numScale) {
+                return num;
+            }
+
+            long rescaleFactor = longTenToNth((int) (numScale - roundScale));
+            long remainder = num % rescaleFactor;
+            return num - remainder;
+        }
+
+        @LiteralParameters({"p", "s"})
+        @SqlType("decimal(p, s)")
+        public static Slice truncateLong(
+                @LiteralParameter("p") Long numPrecision,
+                @LiteralParameter("s") Long numScale,
+                @SqlType("decimal(p, s)") Slice num,
+                @SqlType(StandardTypes.BIGINT) long roundScale)
+        {
+            if (numPrecision - numScale + roundScale <= 0) {
+                return unscaledDecimal(0);
+            }
+            if (roundScale >= numScale) {
+                return num;
+            }
+            int rescaleFactor = (int) (numScale - roundScale);
+            return rescaleTruncate(rescaleTruncate(num, -rescaleFactor), rescaleFactor);
+        }
+    }
+
     @Description("round to given number of decimal places")
     @ScalarFunction("round")
-    @SqlType(StandardTypes.FLOAT)
-    public static long roundFloat(@SqlType(StandardTypes.FLOAT) long num, @SqlType(StandardTypes.BIGINT) long decimals)
+    @SqlType(StandardTypes.REAL)
+    public static long roundFloat(@SqlType(StandardTypes.REAL) long num, @SqlType(StandardTypes.BIGINT) long decimals)
     {
         float numInFloat = intBitsToFloat((int) num);
         if (Float.isNaN(numInFloat) || Float.isInfinite(numInFloat)) {
@@ -552,6 +922,34 @@ public final class MathFunctions
     }
 
     @Description("signum")
+    @ScalarFunction("sign")
+    public static final class Sign
+    {
+        private Sign() {}
+
+        @LiteralParameters({"p", "s"})
+        @SqlType("decimal(1,0)")
+        public static long signDecimalShort(@SqlType("decimal(p, s)") long num)
+        {
+            return (long) Math.signum(num);
+        }
+
+        @LiteralParameters({"p", "s"})
+        @SqlType("decimal(1,0)")
+        public static long signDecimalLong(@SqlType("decimal(p, s)") Slice num)
+        {
+            if (isZero(num)) {
+                return 0;
+            }
+            else if (isNegative(num)) {
+                return -1;
+            }
+            else {
+                return 1;
+            }
+        }
+    }
+
     @ScalarFunction
     @SqlType(StandardTypes.BIGINT)
     public static long sign(@SqlType(StandardTypes.BIGINT) long num)
@@ -593,8 +991,8 @@ public final class MathFunctions
 
     @Description("signum")
     @ScalarFunction("sign")
-    @SqlType(StandardTypes.FLOAT)
-    public static long signFloat(@SqlType(StandardTypes.FLOAT) long num)
+    @SqlType(StandardTypes.REAL)
+    public static long signFloat(@SqlType(StandardTypes.REAL) long num)
     {
         return floatToRawIntBits((Math.signum(intBitsToFloat((int) num))));
     }
@@ -673,7 +1071,7 @@ public final class MathFunctions
 
     @Description("convert a number to a string in the given base")
     @ScalarFunction
-    @SqlType(StandardTypes.VARCHAR)
+    @SqlType("varchar(64)")
     public static Slice toBase(@SqlType(StandardTypes.BIGINT) long value, @SqlType(StandardTypes.BIGINT) long radix)
     {
         checkRadix(radix);
@@ -682,8 +1080,9 @@ public final class MathFunctions
 
     @Description("convert a string in the given base to a number")
     @ScalarFunction
+    @LiteralParameters("x")
     @SqlType(StandardTypes.BIGINT)
-    public static long fromBase(@SqlType(StandardTypes.VARCHAR) Slice value, @SqlType(StandardTypes.BIGINT) long radix)
+    public static long fromBase(@SqlType("varchar(x)") Slice value, @SqlType(StandardTypes.BIGINT) long radix)
     {
         checkRadix(radix);
         try {
@@ -777,7 +1176,7 @@ public final class MathFunctions
 
     @Description("cosine similarity between the given sparse vectors")
     @ScalarFunction
-    @Nullable
+    @SqlNullable
     @SqlType(StandardTypes.DOUBLE)
     public static Double cosineSimilarity(@SqlType("map(varchar,double)") Block leftMap, @SqlType("map(varchar,double)") Block rightMap)
     {

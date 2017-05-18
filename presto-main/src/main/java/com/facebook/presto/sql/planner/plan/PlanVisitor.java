@@ -13,12 +13,11 @@
  */
 package com.facebook.presto.sql.planner.plan;
 
-public class PlanVisitor<C, R>
+import com.facebook.presto.sql.planner.iterative.GroupReference;
+
+public abstract class PlanVisitor<C, R>
 {
-    protected R visitPlan(PlanNode node, C context)
-    {
-        return null;
-    }
+    protected abstract R visitPlan(PlanNode node, C context);
 
     public R visitRemoteSource(RemoteSourceNode node, C context)
     {
@@ -140,6 +139,11 @@ public class PlanVisitor<C, R>
         return visitPlan(node, context);
     }
 
+    public R visitExcept(ExceptNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
     public R visitUnnest(UnnestNode node, C context)
     {
         return visitPlan(node, context);
@@ -176,6 +180,16 @@ public class PlanVisitor<C, R>
     }
 
     public R visitApply(ApplyNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitAssignUniqueId(AssignUniqueId node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitGroupReference(GroupReference node, C context)
     {
         return visitPlan(node, context);
     }

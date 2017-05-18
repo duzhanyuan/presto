@@ -13,7 +13,6 @@
  */
 package com.facebook.presto.plugin.jdbc;
 
-import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorSplitSource;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.predicate.TupleDomain;
@@ -68,6 +67,7 @@ final class TestingDatabase
 
         connection.createStatement().execute("CREATE SCHEMA exa_ple");
         connection.createStatement().execute("CREATE TABLE exa_ple.num_ers(te_t varchar primary key, \"VA%UE\" bigint)");
+        connection.createStatement().execute("CREATE TABLE exa_ple.table_with_float_col(col1 bigint, col2 double, col3 float, col4 real)");
 
         connection.commit();
     }
@@ -93,7 +93,7 @@ final class TestingDatabase
             throws InterruptedException
     {
         JdbcTableHandle jdbcTableHandle = jdbcClient.getTableHandle(new SchemaTableName(schemaName, tableName));
-        JdbcTableLayoutHandle jdbcLayoutHandle = new JdbcTableLayoutHandle(jdbcTableHandle, TupleDomain.<ColumnHandle>all());
+        JdbcTableLayoutHandle jdbcLayoutHandle = new JdbcTableLayoutHandle(jdbcTableHandle, TupleDomain.all());
         ConnectorSplitSource splits = jdbcClient.getSplits(jdbcLayoutHandle);
         return (JdbcSplit) getOnlyElement(getFutureValue(splits.getNextBatch(1000)));
     }

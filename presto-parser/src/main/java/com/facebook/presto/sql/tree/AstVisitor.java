@@ -17,6 +17,11 @@ import javax.annotation.Nullable;
 
 public abstract class AstVisitor<R, C>
 {
+    public R process(Node node)
+    {
+        return process(node, null);
+    }
+
     public R process(Node node, @Nullable C context)
     {
         return node.accept(this, context);
@@ -97,6 +102,16 @@ public abstract class AstVisitor<R, C>
         return visitStatement(node, context);
     }
 
+    protected R visitDescribeOutput(DescribeOutput node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitDescribeInput(DescribeInput node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
     protected R visitQuery(Query node, C context)
     {
         return visitStatement(node, context);
@@ -123,6 +138,11 @@ public abstract class AstVisitor<R, C>
     }
 
     protected R visitShowColumns(ShowColumns node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitShowStats(ShowStats node, C context)
     {
         return visitStatement(node, context);
     }
@@ -157,7 +177,7 @@ public abstract class AstVisitor<R, C>
         return visitStatement(node, context);
     }
 
-    public R visitResetSession(ResetSession node, C context)
+    protected R visitResetSession(ResetSession node, C context)
     {
         return visitStatement(node, context);
     }
@@ -182,11 +202,6 @@ public abstract class AstVisitor<R, C>
         return visitNode(node, context);
     }
 
-    protected R visitApproximate(Approximate node, C context)
-    {
-        return visitNode(node, context);
-    }
-
     protected R visitWithQuery(WithQuery node, C context)
     {
         return visitNode(node, context);
@@ -205,6 +220,11 @@ public abstract class AstVisitor<R, C>
     protected R visitQueryBody(QueryBody node, C context)
     {
         return visitRelation(node, context);
+    }
+
+    protected R visitOrderBy(OrderBy node, C context)
+    {
+        return visitNode(node, context);
     }
 
     protected R visitQuerySpecification(QuerySpecification node, C context)
@@ -272,6 +292,11 @@ public abstract class AstVisitor<R, C>
         return visitLiteral(node, context);
     }
 
+    protected R visitCharLiteral(CharLiteral node, C context)
+    {
+        return visitLiteral(node, context);
+    }
+
     protected R visitBinaryLiteral(BinaryLiteral node, C context)
     {
         return visitLiteral(node, context);
@@ -287,7 +312,7 @@ public abstract class AstVisitor<R, C>
         return visitExpression(node, context);
     }
 
-    protected R visitQualifiedNameReference(QualifiedNameReference node, C context)
+    protected R visitIdentifier(Identifier node, C context)
     {
         return visitExpression(node, context);
     }
@@ -370,6 +395,11 @@ public abstract class AstVisitor<R, C>
     protected R visitLongLiteral(LongLiteral node, C context)
     {
         return visitLiteral(node, context);
+    }
+
+    protected R visitParameter(Parameter node, C context)
+    {
+        return visitExpression(node, context);
     }
 
     protected R visitLogicalBinaryExpression(LogicalBinaryExpression node, C context)
@@ -472,6 +502,31 @@ public abstract class AstVisitor<R, C>
         return visitNode(node, context);
     }
 
+    protected R visitColumnDefinition(ColumnDefinition node, C context)
+    {
+        return visitTableElement(node, context);
+    }
+
+    protected R visitLikeClause(LikeClause node, C context)
+    {
+        return visitTableElement(node, context);
+    }
+
+    protected R visitCreateSchema(CreateSchema node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitDropSchema(DropSchema node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitRenameSchema(RenameSchema node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
     protected R visitCreateTable(CreateTable node, C context)
     {
         return visitStatement(node, context);
@@ -514,12 +569,12 @@ public abstract class AstVisitor<R, C>
 
     protected R visitInsert(Insert node, C context)
     {
-        return visitNode(node, context);
+        return visitStatement(node, context);
     }
 
     protected R visitCall(Call node, C context)
     {
-        return visitNode(node, context);
+        return visitStatement(node, context);
     }
 
     protected R visitDelete(Delete node, C context)
@@ -538,6 +593,11 @@ public abstract class AstVisitor<R, C>
     }
 
     protected R visitRevoke(Revoke node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitShowGrants(ShowGrants node, C context)
     {
         return visitStatement(node, context);
     }
@@ -603,6 +663,21 @@ public abstract class AstVisitor<R, C>
     }
 
     protected R visitSymbolReference(SymbolReference node, C context)
+    {
+        return visitExpression(node, context);
+    }
+
+    protected R visitQuantifiedComparisonExpression(QuantifiedComparisonExpression node, C context)
+    {
+        return visitExpression(node, context);
+    }
+
+    protected R visitLambdaArgumentDeclaration(LambdaArgumentDeclaration node, C context)
+    {
+        return visitExpression(node, context);
+    }
+
+    protected R visitBindExpression(BindExpression node, C context)
     {
         return visitExpression(node, context);
     }

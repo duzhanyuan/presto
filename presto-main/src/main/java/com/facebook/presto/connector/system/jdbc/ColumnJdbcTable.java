@@ -14,10 +14,9 @@
 package com.facebook.presto.connector.system.jdbc;
 
 import com.facebook.presto.Session;
-import com.facebook.presto.connector.system.GlobalSystemTransactionHandle;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.metadata.QualifiedObjectName;
 import com.facebook.presto.metadata.QualifiedTablePrefix;
+import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.ColumnMetadata;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.ConnectorTableMetadata;
@@ -27,7 +26,10 @@ import com.facebook.presto.spi.RecordCursor;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
 import com.facebook.presto.spi.predicate.TupleDomain;
+import com.facebook.presto.spi.type.CharType;
+import com.facebook.presto.spi.type.DecimalType;
 import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.spi.type.VarcharType;
 import com.facebook.presto.type.ArrayType;
 
 import javax.inject.Inject;
@@ -38,15 +40,19 @@ import java.util.List;
 import java.util.Map.Entry;
 import java.util.Optional;
 
+import static com.facebook.presto.connector.system.SystemConnectorSessionUtil.toSession;
 import static com.facebook.presto.connector.system.jdbc.FilterUtil.filter;
 import static com.facebook.presto.connector.system.jdbc.FilterUtil.stringFilter;
-import static com.facebook.presto.connector.system.jdbc.FilterUtil.toSession;
+import static com.facebook.presto.metadata.MetadataListing.listCatalogs;
+import static com.facebook.presto.metadata.MetadataListing.listTableColumns;
 import static com.facebook.presto.metadata.MetadataUtil.TableMetadataBuilder.tableMetadataBuilder;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
+import static com.facebook.presto.spi.type.Chars.isCharType;
 import static com.facebook.presto.spi.type.DateType.DATE;
 import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
 import static com.facebook.presto.spi.type.IntegerType.INTEGER;
+import static com.facebook.presto.spi.type.RealType.REAL;
 import static com.facebook.presto.spi.type.SmallintType.SMALLINT;
 import static com.facebook.presto.spi.type.TimeType.TIME;
 import static com.facebook.presto.spi.type.TimeWithTimeZoneType.TIME_WITH_TIME_ZONE;
@@ -56,7 +62,6 @@ import static com.facebook.presto.spi.type.TinyintType.TINYINT;
 import static com.facebook.presto.spi.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.spi.type.VarcharType.createUnboundedVarcharType;
 import static com.facebook.presto.spi.type.Varchars.isVarcharType;
-import static com.facebook.presto.util.Types.checkType;
 import static java.util.Objects.requireNonNull;
 
 public class ColumnJdbcTable
@@ -92,11 +97,13 @@ public class ColumnJdbcTable
             .build();
 
     private final Metadata metadata;
+    private final AccessControl accessControl;
 
     @Inject
-    public ColumnJdbcTable(Metadata metadata)
+    public ColumnJdbcTable(Metadata metadata, AccessControl accessControl)
     {
-        this.metadata = requireNonNull(metadata);
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.accessControl = requireNonNull(accessControl, "accessControl is null");
     }
 
     @Override
@@ -108,23 +115,22 @@ public class ColumnJdbcTable
     @Override
     public RecordCursor cursor(ConnectorTransactionHandle transactionHandle, ConnectorSession connectorSession, TupleDomain<Integer> constraint)
     {
-        GlobalSystemTransactionHandle transaction = checkType(transactionHandle, GlobalSystemTransactionHandle.class, "transaction");
-        Session session = toSession(transaction.getTransactionId(), connectorSession);
+        Session session = toSession(transactionHandle, connectorSession);
         Optional<String> catalogFilter = stringFilter(constraint, 0);
         Optional<String> schemaFilter = stringFilter(constraint, 1);
         Optional<String> tableFilter = stringFilter(constraint, 2);
 
         Builder table = InMemoryRecordSet.builder(METADATA);
-        for (String catalog : filter(metadata.getCatalogNames().keySet(), catalogFilter)) {
+        for (String catalog : filter(listCatalogs(session, metadata, accessControl).keySet(), catalogFilter)) {
             QualifiedTablePrefix prefix = FilterUtil.tablePrefix(catalog, schemaFilter, tableFilter);
-            for (Entry<QualifiedObjectName, List<ColumnMetadata>> entry : metadata.listTableColumns(session, prefix).entrySet()) {
-                addColumnRows(table, entry.getKey(), entry.getValue());
+            for (Entry<SchemaTableName, List<ColumnMetadata>> entry : listTableColumns(session, metadata, accessControl, prefix).entrySet()) {
+                addColumnRows(table, catalog, entry.getKey(), entry.getValue());
             }
         }
         return table.build().cursor();
     }
 
-    private static void addColumnRows(Builder builder, QualifiedObjectName tableName, List<ColumnMetadata> columns)
+    private static void addColumnRows(Builder builder, String catalog, SchemaTableName tableName, List<ColumnMetadata> columns)
     {
         int ordinalPosition = 1;
         for (ColumnMetadata column : columns) {
@@ -132,22 +138,22 @@ public class ColumnJdbcTable
                 continue;
             }
             builder.addRow(
-                    tableName.getCatalogName(),
+                    catalog,
                     tableName.getSchemaName(),
-                    tableName.getObjectName(),
+                    tableName.getTableName(),
                     column.getName(),
                     jdbcDataType(column.getType()),
                     column.getType().getDisplayName(),
-                    0,
+                    columnSize(column.getType()),
                     0,
                     decimalDigits(column.getType()),
-                    10,
+                    numPrecRadix(column.getType()),
                     DatabaseMetaData.columnNullableUnknown,
                     column.getComment(),
                     null,
                     null,
                     null,
-                    0,
+                    charOctetLength(column.getType()),
                     ordinalPosition,
                     "",
                     null,
@@ -160,7 +166,7 @@ public class ColumnJdbcTable
         }
     }
 
-    private static int jdbcDataType(Type type)
+    static int jdbcDataType(Type type)
     {
         if (type.equals(BOOLEAN)) {
             return Types.BOOLEAN;
@@ -177,11 +183,20 @@ public class ColumnJdbcTable
         if (type.equals(TINYINT)) {
             return Types.TINYINT;
         }
+        if (type.equals(REAL)) {
+            return Types.REAL;
+        }
         if (type.equals(DOUBLE)) {
             return Types.DOUBLE;
         }
+        if (type instanceof DecimalType) {
+            return Types.DECIMAL;
+        }
         if (isVarcharType(type)) {
             return Types.LONGNVARCHAR;
+        }
+        if (isCharType(type)) {
+            return Types.CHAR;
         }
         if (type.equals(VARBINARY)) {
             return Types.LONGVARBINARY;
@@ -207,10 +222,90 @@ public class ColumnJdbcTable
         return Types.JAVA_OBJECT;
     }
 
-    private static Integer decimalDigits(Type type)
+    static Integer columnSize(Type type)
     {
         if (type.equals(BIGINT)) {
-            return 19;
+            return 19;  // 2**63-1
+        }
+        if (type.equals(INTEGER)) {
+            return 10;  // 2**31-1
+        }
+        if (type.equals(SMALLINT)) {
+            return 5;   // 2**15-1
+        }
+        if (type.equals(TINYINT)) {
+            return 3;   // 2**7-1
+        }
+        if (type instanceof DecimalType) {
+            return ((DecimalType) type).getPrecision();
+        }
+        if (type.equals(REAL)) {
+            return 24; // IEEE 754
+        }
+        if (type.equals(DOUBLE)) {
+            return 53; // IEEE 754
+        }
+        if (isVarcharType(type)) {
+            return ((VarcharType) type).getLength();
+        }
+        if (isCharType(type)) {
+            return ((CharType) type).getLength();
+        }
+        if (type.equals(VARBINARY)) {
+            return Integer.MAX_VALUE;
+        }
+        if (type.equals(TIME)) {
+            return 8; // 00:00:00
+        }
+        if (type.equals(TIME_WITH_TIME_ZONE)) {
+            return 8 + 6; // 00:00:00+00:00
+        }
+        if (type.equals(DATE)) {
+            return 14; // +5881580-07-11 (2**31-1 days)
+        }
+        if (type.equals(TIMESTAMP)) {
+            return 15 + 8;
+        }
+        if (type.equals(TIMESTAMP_WITH_TIME_ZONE)) {
+            return 15 + 8 + 6;
+        }
+        return null;
+    }
+
+    // DECIMAL_DIGITS is the number of fractional digits
+    private static Integer decimalDigits(Type type)
+    {
+        if (type instanceof DecimalType) {
+            return ((DecimalType) type).getScale();
+        }
+        return null;
+    }
+
+    private static Integer charOctetLength(Type type)
+    {
+        if (isVarcharType(type)) {
+            return ((VarcharType) type).getLength();
+        }
+        if (isCharType(type)) {
+            return ((CharType) type).getLength();
+        }
+        if (type.equals(VARBINARY)) {
+            return Integer.MAX_VALUE;
+        }
+        return null;
+    }
+
+    static Integer numPrecRadix(Type type)
+    {
+        if (type.equals(BIGINT) ||
+                type.equals(INTEGER) ||
+                type.equals(SMALLINT) ||
+                type.equals(TINYINT) ||
+                (type instanceof DecimalType)) {
+            return 10;
+        }
+        if (type.equals(REAL) || type.equals(DOUBLE)) {
+            return 2;
         }
         return null;
     }

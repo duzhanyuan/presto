@@ -15,15 +15,11 @@ package com.facebook.presto.operator;
 
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PageBuilder;
-import com.facebook.presto.spi.block.Block;
-
-import java.util.Optional;
 
 public interface PagesHashStrategy
 {
     /**
-     * Gets the total of the columns held in in this PagesHashStrategy.  This includes both the hashed
-     * and non-hashed columns.
+     * Gets the number of columns appended by this PagesHashStrategy.
      */
     int getChannelCount();
 
@@ -93,17 +89,17 @@ public interface PagesHashStrategy
     boolean positionEqualsPositionIgnoreNulls(int leftBlockIndex, int leftPosition, int rightBlockIndex, int rightPosition);
 
     /**
-     * Returns filter function assigned to this PagesHashStrategy.
-     */
-    Optional<JoinFilterFunction> getFilterFunction();
-
-    /**
-     * Checks result of filter function for given row.
-     */
-    boolean applyFilterFunction(int leftBlockIndex, int leftPosition, int rightPosition, Block[] allRightBlocks);
-
-    /**
      * Checks if any of the hashed columns is null
      */
     boolean isPositionNull(int blockIndex, int blockPosition);
+
+    /**
+     * Compares sort channel (if applicable) values at the specified positions.
+     */
+    int compareSortChannelPositions(int leftBlockIndex, int leftBlockPosition, int rightBlockIndex, int rightBlockPosition);
+
+    /**
+     * Checks if sort channel is null at the specified position
+     */
+    boolean isSortChannelPositionNull(int blockIndex, int blockPosition);
 }

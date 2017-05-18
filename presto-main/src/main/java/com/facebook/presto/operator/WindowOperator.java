@@ -13,13 +13,12 @@
  */
 package com.facebook.presto.operator;
 
-import com.facebook.presto.operator.window.FrameInfo;
+import com.facebook.presto.operator.window.FramedWindowFunction;
 import com.facebook.presto.operator.window.WindowPartition;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PageBuilder;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.SortOrder;
-import com.facebook.presto.spi.function.WindowFunction;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.planner.plan.PlanNodeId;
 import com.google.common.collect.ImmutableList;
@@ -32,10 +31,10 @@ import java.util.Optional;
 import java.util.stream.Stream;
 
 import static com.facebook.presto.spi.block.SortOrder.ASC_NULLS_LAST;
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableList;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkPositionIndex;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.concat;
 import static java.util.Collections.nCopies;
 import static java.util.Objects.requireNonNull;
@@ -56,10 +55,10 @@ public class WindowOperator
         private final List<Integer> sortChannels;
         private final List<SortOrder> sortOrder;
         private final int preSortedChannelPrefix;
-        private final FrameInfo frameInfo;
         private final int expectedPositions;
         private final List<Type> types;
         private boolean closed;
+        private final PagesIndex.Factory pagesIndexFactory;
 
         public WindowOperatorFactory(
                 int operatorId,
@@ -72,8 +71,8 @@ public class WindowOperator
                 List<Integer> sortChannels,
                 List<SortOrder> sortOrder,
                 int preSortedChannelPrefix,
-                FrameInfo frameInfo,
-                int expectedPositions)
+                int expectedPositions,
+                PagesIndex.Factory pagesIndexFactory)
         {
             requireNonNull(sourceTypes, "sourceTypes is null");
             requireNonNull(planNodeId, "planNodeId is null");
@@ -84,11 +83,12 @@ public class WindowOperator
             checkArgument(partitionChannels.containsAll(preGroupedChannels), "preGroupedChannels must be a subset of partitionChannels");
             requireNonNull(sortChannels, "sortChannels is null");
             requireNonNull(sortOrder, "sortOrder is null");
+            requireNonNull(pagesIndexFactory, "pagesIndexFactory is null");
             checkArgument(sortChannels.size() == sortOrder.size(), "Must have same number of sort channels as sort orders");
             checkArgument(preSortedChannelPrefix <= sortChannels.size(), "Cannot have more pre-sorted channels than specified sorted channels");
             checkArgument(preSortedChannelPrefix == 0 || ImmutableSet.copyOf(preGroupedChannels).equals(ImmutableSet.copyOf(partitionChannels)), "preSortedChannelPrefix can only be greater than zero if all partition channels are pre-grouped");
-            requireNonNull(frameInfo, "frameInfo is null");
 
+            this.pagesIndexFactory = pagesIndexFactory;
             this.operatorId = operatorId;
             this.planNodeId = planNodeId;
             this.sourceTypes = ImmutableList.copyOf(sourceTypes);
@@ -99,7 +99,6 @@ public class WindowOperator
             this.sortChannels = ImmutableList.copyOf(sortChannels);
             this.sortOrder = ImmutableList.copyOf(sortOrder);
             this.preSortedChannelPrefix = preSortedChannelPrefix;
-            this.frameInfo = frameInfo;
             this.expectedPositions = expectedPositions;
             this.types = Stream.concat(
                     outputChannels.stream()
@@ -131,8 +130,8 @@ public class WindowOperator
                     sortChannels,
                     sortOrder,
                     preSortedChannelPrefix,
-                    frameInfo,
-                    expectedPositions);
+                    expectedPositions,
+                    pagesIndexFactory);
         }
 
         @Override
@@ -155,8 +154,8 @@ public class WindowOperator
                 sortChannels,
                 sortOrder,
                 preSortedChannelPrefix,
-                frameInfo,
-                expectedPositions);
+                expectedPositions,
+                pagesIndexFactory);
         }
     }
 
@@ -170,7 +169,7 @@ public class WindowOperator
 
     private final OperatorContext operatorContext;
     private final int[] outputChannels;
-    private final List<WindowFunction> windowFunctions;
+    private final List<FramedWindowFunction> windowFunctions;
     private final List<Integer> orderChannels;
     private final List<SortOrder> ordering;
     private final List<Type> types;
@@ -181,8 +180,6 @@ public class WindowOperator
     private final PagesHashStrategy unGroupedPartitionHashStrategy;
     private final PagesHashStrategy preSortedPartitionHashStrategy;
     private final PagesHashStrategy peerGroupHashStrategy;
-
-    private final FrameInfo frameInfo;
 
     private final PagesIndex pagesIndex;
 
@@ -204,8 +201,8 @@ public class WindowOperator
             List<Integer> sortChannels,
             List<SortOrder> sortOrder,
             int preSortedChannelPrefix,
-            FrameInfo frameInfo,
-            int expectedPositions)
+            int expectedPositions,
+            PagesIndex.Factory pagesIndexFactory)
     {
         requireNonNull(operatorContext, "operatorContext is null");
         requireNonNull(outputChannels, "outputChannels is null");
@@ -215,17 +212,16 @@ public class WindowOperator
         checkArgument(partitionChannels.containsAll(preGroupedChannels), "preGroupedChannels must be a subset of partitionChannels");
         requireNonNull(sortChannels, "sortChannels is null");
         requireNonNull(sortOrder, "sortOrder is null");
+        requireNonNull(pagesIndexFactory, "pagesIndexFactory is null");
         checkArgument(sortChannels.size() == sortOrder.size(), "Must have same number of sort channels as sort orders");
         checkArgument(preSortedChannelPrefix <= sortChannels.size(), "Cannot have more pre-sorted channels than specified sorted channels");
         checkArgument(preSortedChannelPrefix == 0 || ImmutableSet.copyOf(preGroupedChannels).equals(ImmutableSet.copyOf(partitionChannels)), "preSortedChannelPrefix can only be greater than zero if all partition channels are pre-grouped");
-        requireNonNull(frameInfo, "frameInfo is null");
 
         this.operatorContext = operatorContext;
         this.outputChannels = Ints.toArray(outputChannels);
         this.windowFunctions = windowFunctionDefinitions.stream()
-                .map(WindowFunctionDefinition::createWindowFunction)
+                .map(functionDefinition -> new FramedWindowFunction(functionDefinition.createWindowFunction(), functionDefinition.getFrameInfo()))
                 .collect(toImmutableList());
-        this.frameInfo = frameInfo;
 
         this.types = Stream.concat(
                 outputChannels.stream()
@@ -234,9 +230,9 @@ public class WindowOperator
                         .map(WindowFunctionDefinition::getType))
                 .collect(toImmutableList());
 
-        this.pagesIndex = new PagesIndex(sourceTypes, expectedPositions);
+        this.pagesIndex = pagesIndexFactory.newPagesIndex(sourceTypes, expectedPositions);
         this.preGroupedChannels = Ints.toArray(preGroupedChannels);
-        this.preGroupedPartitionHashStrategy = pagesIndex.createPagesHashStrategy(preGroupedChannels, Optional.<Integer>empty());
+        this.preGroupedPartitionHashStrategy = pagesIndex.createPagesHashStrategy(preGroupedChannels, Optional.empty());
         List<Integer> unGroupedPartitionChannels = partitionChannels.stream()
                 .filter(channel -> !preGroupedChannels.contains(channel))
                 .collect(toImmutableList());
@@ -244,7 +240,7 @@ public class WindowOperator
         List<Integer> preSortedChannels = sortChannels.stream()
                 .limit(preSortedChannelPrefix)
                 .collect(toImmutableList());
-        this.preSortedPartitionHashStrategy = pagesIndex.createPagesHashStrategy(preSortedChannels, Optional.<Integer>empty());
+        this.preSortedPartitionHashStrategy = pagesIndex.createPagesHashStrategy(preSortedChannels, Optional.empty());
         this.peerGroupHashStrategy = pagesIndex.createPagesHashStrategy(sortChannels, Optional.empty());
 
         this.pageBuilder = new PageBuilder(this.types);
@@ -422,7 +418,7 @@ public class WindowOperator
                 }
 
                 int partitionEnd = findGroupEnd(pagesIndex, unGroupedPartitionHashStrategy, partitionStart);
-                partition = new WindowPartition(pagesIndex, partitionStart, partitionEnd, outputChannels, windowFunctions, frameInfo, peerGroupHashStrategy);
+                partition = new WindowPartition(pagesIndex, partitionStart, partitionEnd, outputChannels, windowFunctions, peerGroupHashStrategy);
             }
 
             partition.processNextRow(pageBuilder);

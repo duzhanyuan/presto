@@ -20,6 +20,7 @@ import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PageBuilder;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
+import com.facebook.presto.spi.type.CharType;
 import com.facebook.presto.spi.type.SqlDate;
 import com.facebook.presto.spi.type.SqlDecimal;
 import com.facebook.presto.spi.type.SqlTime;
@@ -28,6 +29,7 @@ import com.facebook.presto.spi.type.SqlTimestamp;
 import com.facebook.presto.spi.type.SqlTimestampWithTimeZone;
 import com.facebook.presto.spi.type.TimeZoneKey;
 import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.spi.type.VarcharType;
 import com.facebook.presto.type.ArrayType;
 import com.facebook.presto.type.MapType;
 import com.facebook.presto.type.RowType;
@@ -58,6 +60,7 @@ import static com.facebook.presto.spi.type.DateTimeEncoding.packDateTimeWithZone
 import static com.facebook.presto.spi.type.DateType.DATE;
 import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
 import static com.facebook.presto.spi.type.IntegerType.INTEGER;
+import static com.facebook.presto.spi.type.RealType.REAL;
 import static com.facebook.presto.spi.type.SmallintType.SMALLINT;
 import static com.facebook.presto.spi.type.StandardTypes.ARRAY;
 import static com.facebook.presto.spi.type.StandardTypes.MAP;
@@ -67,11 +70,11 @@ import static com.facebook.presto.spi.type.TimestampType.TIMESTAMP;
 import static com.facebook.presto.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
 import static com.facebook.presto.spi.type.TinyintType.TINYINT;
 import static com.facebook.presto.spi.type.VarbinaryType.VARBINARY;
-import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
-import static com.facebook.presto.util.ImmutableCollectors.toImmutableSet;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static java.lang.Float.floatToRawIntBits;
 import static java.util.Objects.requireNonNull;
 
 public class MaterializedResult
@@ -238,13 +241,19 @@ public class MaterializedResult
         else if (TINYINT.equals(type)) {
             type.writeLong(blockBuilder, ((Number) value).byteValue());
         }
+        else if (REAL.equals(type)) {
+            type.writeLong(blockBuilder, (long) floatToRawIntBits(((Number) value).floatValue()));
+        }
         else if (DOUBLE.equals(type)) {
             type.writeDouble(blockBuilder, ((Number) value).doubleValue());
         }
         else if (BOOLEAN.equals(type)) {
             type.writeBoolean(blockBuilder, (Boolean) value);
         }
-        else if (VARCHAR.equals(type)) {
+        else if (type instanceof VarcharType) {
+            type.writeSlice(blockBuilder, Slices.utf8Slice((String) value));
+        }
+        else if (type instanceof CharType) {
             type.writeSlice(blockBuilder, Slices.utf8Slice((String) value));
         }
         else if (VARBINARY.equals(type)) {

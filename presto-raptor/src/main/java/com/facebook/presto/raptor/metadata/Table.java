@@ -18,7 +18,7 @@ import org.skife.jdbi.v2.tweak.ResultSetMapper;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 
@@ -31,15 +31,25 @@ public final class Table
 {
     private final long tableId;
     private final OptionalLong distributionId;
+    private final Optional<String> distributionName;
     private final OptionalInt bucketCount;
     private final OptionalLong temporalColumnId;
+    private final boolean organized;
 
-    public Table(long tableId, OptionalLong distributionId, OptionalInt bucketCount, OptionalLong temporalColumnId)
+    public Table(
+            long tableId,
+            OptionalLong distributionId,
+            Optional<String> distributionName,
+            OptionalInt bucketCount,
+            OptionalLong temporalColumnId,
+            boolean organized)
     {
         this.tableId = tableId;
         this.distributionId = requireNonNull(distributionId, "distributionId is null");
+        this.distributionName = requireNonNull(distributionName, "distributionName is null");
         this.bucketCount = requireNonNull(bucketCount, "bucketCount is null");
         this.temporalColumnId = requireNonNull(temporalColumnId, "temporalColumnId is null");
+        this.organized = organized;
     }
 
     public long getTableId()
@@ -52,6 +62,11 @@ public final class Table
         return distributionId;
     }
 
+    public Optional<String> getDistributionName()
+    {
+        return distributionName;
+    }
+
     public OptionalInt getBucketCount()
     {
         return bucketCount;
@@ -62,26 +77,9 @@ public final class Table
         return temporalColumnId;
     }
 
-    @Override
-    public boolean equals(Object o)
+    public boolean isOrganized()
     {
-        if (this == o) {
-            return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
-        }
-        Table table = (Table) o;
-        return tableId == table.tableId &&
-                Objects.equals(distributionId, table.distributionId) &&
-                Objects.equals(bucketCount, table.bucketCount) &&
-                Objects.equals(temporalColumnId, table.temporalColumnId);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(tableId, distributionId, bucketCount, temporalColumnId);
+        return organized;
     }
 
     @Override
@@ -92,6 +90,7 @@ public final class Table
                 .add("distributionId", distributionId.isPresent() ? distributionId.getAsLong() : null)
                 .add("bucketCount", bucketCount.isPresent() ? bucketCount.getAsInt() : null)
                 .add("temporalColumnId", temporalColumnId.isPresent() ? temporalColumnId.getAsLong() : null)
+                .add("organized", organized)
                 .omitNullValues()
                 .toString();
     }
@@ -106,8 +105,10 @@ public final class Table
             return new Table(
                     r.getLong("table_id"),
                     getOptionalLong(r, "distribution_id"),
+                    Optional.ofNullable(r.getString("distribution_name")),
                     getOptionalInt(r, "bucket_count"),
-                    getOptionalLong(r, "temporal_column_id"));
+                    getOptionalLong(r, "temporal_column_id"),
+                    r.getBoolean("organization_enabled"));
         }
     }
 }

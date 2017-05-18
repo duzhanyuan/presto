@@ -26,16 +26,25 @@ import java.util.Set;
 
 public interface MetadataDao
 {
-    @SqlQuery("SELECT t.table_id, t.distribution_id, d.bucket_count, t.temporal_column_id\n" +
+    String TABLE_INFORMATION_SELECT = "" +
+            "SELECT t.table_id, t.distribution_id, d.distribution_name, d.bucket_count, t.temporal_column_id, t.organization_enabled\n" +
             "FROM tables t\n" +
-            "LEFT JOIN distributions d ON (t.distribution_id = d.distribution_id)\n" +
+            "LEFT JOIN distributions d ON (t.distribution_id = d.distribution_id)\n";
+
+    String TABLE_COLUMN_SELECT = "" +
+            "SELECT t.schema_name, t.table_name,\n" +
+            "  c.column_id, c.column_name, c.data_type,\n" +
+            "  c.bucket_ordinal_position, c.sort_ordinal_position,\n" +
+            "  t.temporal_column_id = c.column_id AS temporal\n" +
+            "FROM tables t\n" +
+            "JOIN columns c ON (t.table_id = c.table_id)\n";
+
+    @SqlQuery(TABLE_INFORMATION_SELECT +
             "WHERE t.table_id = :tableId")
     @Mapper(TableMapper.class)
     Table getTableInformation(@Bind("tableId") long tableId);
 
-    @SqlQuery("SELECT t.table_id, t.distribution_id, d.bucket_count, t.temporal_column_id\n" +
-            "FROM tables t\n" +
-            "LEFT JOIN distributions d ON (t.distribution_id = d.distribution_id)\n" +
+    @SqlQuery(TABLE_INFORMATION_SELECT +
             "WHERE t.schema_name = :schemaName\n" +
             "  AND t.table_name = :tableName")
     @Mapper(TableMapper.class)
@@ -43,24 +52,13 @@ public interface MetadataDao
             @Bind("schemaName") String schemaName,
             @Bind("tableName") String tableName);
 
-    @SqlQuery("SELECT t.schema_name, t.table_name,\n" +
-            "  c.column_id, c.column_name, c.ordinal_position, c.data_type\n" +
-            "FROM tables t\n" +
-            "JOIN columns c ON (t.table_id = c.table_id)\n" +
+    @SqlQuery(TABLE_COLUMN_SELECT +
             "WHERE t.table_id = :tableId\n" +
             "  AND c.column_id = :columnId\n" +
             "ORDER BY c.ordinal_position\n")
     TableColumn getTableColumn(
             @Bind("tableId") long tableId,
             @Bind("columnId") long columnId);
-
-    @SqlQuery("SELECT t.schema_name, t.table_name,\n" +
-            "  c.column_id, c.column_name, c.ordinal_position, c.data_type\n" +
-            "FROM tables t\n" +
-            "JOIN columns c ON (t.table_id = c.table_id)\n" +
-            "WHERE t.table_id = :tableId\n" +
-            "ORDER BY c.ordinal_position")
-    List<TableColumn> getTableColumns(@Bind("tableId") long tableId);
 
     @SqlQuery("SELECT schema_name, table_name\n" +
             "FROM tables\n" +
@@ -72,9 +70,7 @@ public interface MetadataDao
     @SqlQuery("SELECT DISTINCT schema_name FROM tables")
     List<String> listSchemaNames();
 
-    @SqlQuery("SELECT t.schema_name, t.table_name, c.column_id, c.column_name, c.data_type\n" +
-            "FROM tables t\n" +
-            "JOIN columns c ON (t.table_id = c.table_id)\n" +
+    @SqlQuery(TABLE_COLUMN_SELECT +
             "WHERE (schema_name = :schemaName OR :schemaName IS NULL)\n" +
             "  AND (table_name = :tableName OR :tableName IS NULL)\n" +
             "ORDER BY schema_name, table_name, ordinal_position")
@@ -82,25 +78,18 @@ public interface MetadataDao
             @Bind("schemaName") String schemaName,
             @Bind("tableName") String tableName);
 
-    @SqlQuery("SELECT t.schema_name, t.table_name, c.column_id, c.column_name, c.data_type\n" +
-            "FROM tables t\n" +
-            "JOIN columns c ON (t.table_id = c.table_id)\n" +
+    @SqlQuery(TABLE_COLUMN_SELECT +
             "WHERE t.table_id = :tableId\n" +
             "ORDER BY c.ordinal_position")
     List<TableColumn> listTableColumns(@Bind("tableId") long tableId);
 
-    @SqlQuery("SELECT t.schema_name, t.table_name,\n" +
-            "  c.column_id, c.column_name, c.ordinal_position, c.data_type\n" +
-            "FROM tables t\n" +
-            "JOIN columns c ON (t.table_id = c.table_id)\n" +
+    @SqlQuery(TABLE_COLUMN_SELECT +
             "WHERE t.table_id = :tableId\n" +
             "  AND c.sort_ordinal_position IS NOT NULL\n" +
             "ORDER BY c.sort_ordinal_position")
     List<TableColumn> listSortColumns(@Bind("tableId") long tableId);
 
-    @SqlQuery("SELECT t.schema_name, t.table_name, c.column_id, c.column_name, c.data_type\n" +
-            "FROM tables t\n" +
-            "JOIN columns c ON (t.table_id = c.table_id)\n" +
+    @SqlQuery(TABLE_COLUMN_SELECT +
             "WHERE t.table_id = :tableId\n" +
             "  AND c.bucket_ordinal_position IS NOT NULL\n" +
             "ORDER BY c.bucket_ordinal_position")
@@ -224,8 +213,10 @@ public interface MetadataDao
             @Bind("tableId") long tableId,
             @Bind("columnId") long columnId);
 
-    @SqlQuery("SELECT compaction_enabled FROM tables WHERE table_id = :tableId")
-    boolean isCompactionEnabled(@Bind("tableId") long tableId);
+    @SqlQuery("SELECT compaction_enabled AND maintenance_blocked IS NULL\n" +
+            "FROM tables\n" +
+            "WHERE table_id = :tableId")
+    boolean isCompactionEligible(@Bind("tableId") long tableId);
 
     @SqlQuery("SELECT table_id FROM tables WHERE table_id = :tableId FOR UPDATE")
     Long getLockedTableId(@Bind("tableId") long tableId);
@@ -248,7 +239,7 @@ public interface MetadataDao
             @Bind("columnTypes") String columnTypes,
             @Bind("bucketCount") int bucketCount);
 
-    @SqlQuery("SELECT table_id, schema_name, table_name, temporal_column_id, distribution_name, bucket_count\n" +
+    @SqlQuery("SELECT table_id, schema_name, table_name, temporal_column_id, distribution_name, bucket_count, organization_enabled\n" +
             "FROM tables\n" +
             "LEFT JOIN distributions\n" +
             "ON tables.distribution_id = distributions.distribution_id\n" +
@@ -287,9 +278,29 @@ public interface MetadataDao
     @SqlQuery("SELECT table_id\n" +
             "FROM tables\n" +
             "WHERE organization_enabled\n" +
+            "  AND maintenance_blocked IS NULL\n" +
             "  AND table_id IN\n" +
             "       (SELECT table_id\n" +
             "        FROM columns\n" +
             "        WHERE sort_ordinal_position IS NOT NULL)")
     Set<Long> getOrganizationEligibleTables();
+
+    @SqlUpdate("UPDATE tables SET maintenance_blocked = CURRENT_TIMESTAMP\n" +
+            "WHERE table_id = :tableId\n" +
+            "  AND maintenance_blocked IS NULL")
+    void blockMaintenance(@Bind("tableId") long tableId);
+
+    @SqlUpdate("UPDATE tables SET maintenance_blocked = NULL\n" +
+            "WHERE table_id = :tableId")
+    void unblockMaintenance(@Bind("tableId") long tableId);
+
+    @SqlQuery("SELECT maintenance_blocked IS NOT NULL\n" +
+            "FROM tables\n" +
+            "WHERE table_id = :tableId\n" +
+            "FOR UPDATE")
+    boolean isMaintenanceBlockedLocked(@Bind("tableId") long tableId);
+
+    @SqlUpdate("UPDATE tables SET maintenance_blocked = NULL\n" +
+            "WHERE maintenance_blocked IS NOT NULL")
+    void unblockAllMaintenance();
 }
